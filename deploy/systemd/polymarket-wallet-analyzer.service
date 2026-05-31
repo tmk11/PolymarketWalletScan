@@ -1,0 +1,19 @@
+[Unit]
+Description=Polymarket Wallet Analyzer Streamlit app
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ubuntu
+Group=ubuntu
+WorkingDirectory=/home/ubuntu/polymarket-wallet-analyzer
+Environment=PATH=/home/ubuntu/polymarket-wallet-analyzer/.venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+ExecStart=/home/ubuntu/polymarket-wallet-analyzer/.venv/bin/streamlit run /home/ubuntu/polymarket-wallet-analyzer/app.py --server.address=127.0.0.1 --server.port=8501 --server.headless=true
+Restart=always
+RestartSec=5
+KillSignal=SIGINT
+TimeoutStopSec=30
+
+[Install]
+WantedBy=multi-user.target

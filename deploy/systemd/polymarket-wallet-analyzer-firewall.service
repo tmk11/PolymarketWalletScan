@@ -1,0 +1,12 @@
+[Unit]
+Description=Open firewall port 9765 for Polymarket Wallet Analyzer
+After=network-pre.target
+Wants=network-pre.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/bin/sh -c 'iptables -C INPUT -p tcp --dport 9765 -j ACCEPT 2>/dev/null || iptables -I INPUT -p tcp --dport 9765 -j ACCEPT; if command -v ip6tables >/dev/null 2>&1; then ip6tables -C INPUT -p tcp --dport 9765 -j ACCEPT 2>/dev/null || ip6tables -I INPUT -p tcp --dport 9765 -j ACCEPT; fi'
+
+[Install]
+WantedBy=multi-user.target
