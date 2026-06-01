@@ -23,6 +23,7 @@ def pct(value: float | None) -> str:
     return f"{value * 100:,.2f}%"
 
 
+
 def fetch_and_analyze(wallet: str, max_records: int) -> dict:
     client = PolymarketClient()
     wallet_data = client.fetch_wallet_data(wallet, max_records=max_records)
@@ -67,7 +68,7 @@ skill = report["skill"]
 markets = report["markets"]
 df = pd.DataFrame(markets)
 
-if skill["data_truncated"]:
+if skill.get("data_truncated"):
     st.warning(
         "⚠️ Dữ liệu fetch về đã chạm giới hạn `max_records` ở ít nhất một endpoint, "
         "nên đây có thể chỉ là **một phần** lịch sử của ví. Hãy tăng giá trị slider và "
@@ -76,25 +77,29 @@ if skill["data_truncated"]:
 
 st.subheader("Tổng quan")
 metric_cols = st.columns(5)
-metric_cols[0].metric("Trading PnL", money(summary["trading_pnl"]))
-metric_cols[1].metric("ROI buy notional", pct(summary["roi_buy_notional"]))
-metric_cols[2].metric("Win rate", pct(summary["market_win_rate"]))
-metric_cols[3].metric("Số market", f"{summary['market_count']:,}")
-metric_cols[4].metric("Verdict", summary["verdict"])
+metric_cols[0].metric("Trading PnL", money(summary.get("trading_pnl")))
+metric_cols[1].metric("ROI buy notional", pct(summary.get("roi_buy_notional")))
+metric_cols[2].metric("Win rate", pct(summary.get("market_win_rate")))
+metric_cols[3].metric("Số market", f"{summary.get('market_count', summary.get('total_markets', 0)):,}")
+metric_cols[4].metric("Verdict", summary.get("verdict", "inconclusive"))
 
 metric_cols = st.columns(5)
-metric_cols[0].metric("ROI cost basis", pct(summary["roi_cost_basis"]))
-metric_cols[1].metric("ROI ex top1", pct(summary["roi_ex_top1_buy_notional"]))
-metric_cols[2].metric("Realized PnL", money(summary["total_realized_pnl"]))
-metric_cols[3].metric("Unrealized PnL", money(summary["total_unrealized_pnl"]))
-metric_cols[4].metric("Rewards PnL", money(summary["rewards_pnl"]))
+metric_cols[0].metric("ROI cost basis", pct(summary.get("roi_cost_basis")))
+metric_cols[1].metric("ROI ex top1", pct(summary.get("roi_ex_top1_buy_notional")))
+metric_cols[2].metric("Realized PnL", money(summary.get("total_realized_pnl", summary.get("realized_pnl"))))
+metric_cols[3].metric("Unrealized PnL", money(summary.get("total_unrealized_pnl", summary.get("unrealized_pnl"))))
+metric_cols[4].metric("Rewards PnL", money(summary.get("rewards_pnl")))
 
 metric_cols = st.columns(5)
-metric_cols[0].metric("Top1/net PnL", pct(summary["top1_contribution_net_pnl"]))
-metric_cols[1].metric("Top1/gross profit", pct(summary["top1_share_of_gross_profit"]))
-metric_cols[2].metric("Profit factor", "∞" if summary["profit_factor"] == float("inf") else f"{summary['profit_factor']:.2f}" if summary["profit_factor"] is not None else "N/A")
-metric_cols[3].metric("Confidence", summary["confidence_level"])
-metric_cols[4].metric("Unmapped", f"{summary['unmapped_records_count']:,}")
+metric_cols[0].metric("Top1/net PnL", pct(summary.get("top1_contribution_net_pnl")))
+metric_cols[1].metric("Top1/gross profit", pct(summary.get("top1_share_of_gross_profit")))
+profit_factor = summary.get("profit_factor")
+metric_cols[2].metric(
+    "Profit factor",
+    "∞" if profit_factor == float("inf") else f"{profit_factor:.2f}" if profit_factor is not None else "N/A",
+)
+metric_cols[3].metric("Confidence", summary.get("confidence_level", "medium"))
+metric_cols[4].metric("Unmapped", f"{summary.get('unmapped_records_count', 0):,}")
 
 st.subheader("🎯 Skilled hay Ăn may?")
 
@@ -108,12 +113,12 @@ verdict_styles = {
 }
 confidence_labels = {"high": "Độ tin cậy cao", "medium": "Độ tin cậy trung bình", "low": "Độ tin cậy thấp"}
 
-score = skill["skill_score"]
-verdict_box = verdict_styles.get(skill["verdict"], st.info)
+score = skill.get("skill_score")
+verdict_box = verdict_styles.get(skill.get("verdict", "inconclusive"), st.info)
 
 score_col, gauge_col = st.columns([1, 2])
 score_col.metric("Skill score", f"{score}/100" if score is not None else "N/A")
-score_col.caption(confidence_labels.get(skill["confidence"], skill["confidence"]))
+score_col.caption(confidence_labels.get(skill.get("confidence", "medium"), skill.get("confidence", "medium")))
 
 if score is not None:
     gauge = go.Figure(
@@ -135,7 +140,7 @@ if score is not None:
     gauge.update_layout(height=220, margin=dict(l=20, r=20, t=20, b=10))
     gauge_col.plotly_chart(gauge, use_container_width=True)
 
-verdict_box(f"**{skill['verdict_label']}** — {skill['verdict_detail']}")
+verdict_box(f"**{skill.get('verdict_label', 'Chưa kết luận')}** — {skill.get('verdict_detail', '')}")
 st.caption(summary.get("category_skill_summary", ""))
 
 st.markdown("**Vì sao có điểm này?** (đóng góp của từng tiêu chí vào tổng điểm)")
@@ -147,7 +152,7 @@ breakdown_rows = [
         "Đóng góp": component["contribution"],
         "Chi tiết": component["detail"],
     }
-    for component in skill["components"]
+    for component in skill.get("components", [])
 ]
 st.dataframe(
     pd.DataFrame(breakdown_rows),
@@ -161,30 +166,30 @@ st.dataframe(
 )
 
 with st.expander("Chỉ số chi tiết skill (edge, thống kê, rủi ro)"):
-    edge = skill["edge"]
-    significance = skill["significance"]
-    risk = skill["risk"]
-    breadth = skill["breadth"]
+    edge = skill.get("edge", {})
+    significance = skill.get("significance", {})
+    risk = skill.get("risk", {})
+    breadth = skill.get("breadth", {})
     info_cols = st.columns(4)
-    info_cols[0].metric("Edge / share", pct(edge["edge_per_share"]) if edge["edge_per_share"] is not None else "N/A")
+    info_cols[0].metric("Edge / share", pct(edge.get("edge_per_share")) if edge.get("edge_per_share") is not None else "N/A")
     info_cols[1].metric(
         "Win rate (đã resolve)",
-        pct(edge["win_rate"]) if edge["win_rate"] is not None else "N/A",
+        pct(edge.get("win_rate")) if edge.get("win_rate") is not None else "N/A",
     )
     info_cols[2].metric(
-        "Sharpe (ROI)", f"{risk['sharpe']:.2f}" if risk["sharpe"] is not None else "N/A"
+        "Sharpe (ROI)", f"{risk.get('sharpe'):.2f}" if risk.get("sharpe") is not None else "N/A"
     )
     info_cols[3].metric(
-        "Profit factor", f"{risk['profit_factor']:.2f}" if risk["profit_factor"] is not None else "∞"
+        "Profit factor", f"{risk.get('profit_factor'):.2f}" if risk.get("profit_factor") is not None else "∞"
     )
     info_cols = st.columns(4)
-    info_cols[0].metric("Kèo đã resolve", f"{edge['n_resolved']:,}")
-    info_cols[1].metric("Event độc lập", f"{breadth['effective_bets']:,}")
-    if significance["ci_low"] is not None:
-        info_cols[2].metric("CI dưới (ROI)", pct(significance["ci_low"]))
-        info_cols[3].metric("CI trên (ROI)", pct(significance["ci_high"]))
+    info_cols[0].metric("Kèo đã resolve", f"{edge.get('n_resolved', 0):,}")
+    info_cols[1].metric("Event độc lập", f"{breadth.get('effective_bets', 0):,}")
+    if significance.get("ci_low") is not None:
+        info_cols[2].metric("CI dưới (ROI)", pct(significance.get("ci_low")))
+        info_cols[3].metric("CI trên (ROI)", pct(significance.get("ci_high")))
 
-monthly = skill["consistency"]["monthly_pnl"]
+monthly = skill.get("consistency", {}).get("monthly_pnl", [])
 if len(monthly) >= 2:
     monthly_df = pd.DataFrame(monthly)
     monthly_df["cumulative"] = monthly_df["pnl"].cumsum()
@@ -197,10 +202,10 @@ if len(monthly) >= 2:
 
 st.subheader("Chi tiết tập trung lợi nhuận")
 detail_cols = st.columns(4)
-detail_cols[0].metric("Top1/net PnL", pct(summary["top1_contribution_net_pnl"]))
-detail_cols[1].metric("Top3/net PnL", pct(summary["top3_contribution_net_pnl"]))
-detail_cols[2].metric("ROI ex top1 buy", pct(summary["roi_ex_top1_buy_notional"]))
-detail_cols[3].metric("ROI ex top3 buy", pct(summary["roi_ex_top3_buy_notional"]))
+detail_cols[0].metric("Top1/net PnL", pct(summary.get("top1_contribution_net_pnl")))
+detail_cols[1].metric("Top3/net PnL", pct(summary.get("top3_contribution_net_pnl")))
+detail_cols[2].metric("ROI ex top1 buy", pct(summary.get("roi_ex_top1_buy_notional")))
+detail_cols[3].metric("ROI ex top3 buy", pct(summary.get("roi_ex_top3_buy_notional")))
 
 if report.get("warnings"):
     with st.expander("Cảnh báo dữ liệu"):

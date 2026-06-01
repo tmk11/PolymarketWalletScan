@@ -80,6 +80,7 @@ mypy .
 - `roi_cost_basis`: `trading_pnl / cost_basis`. Đây là ROI trên vốn gốc/cost basis ước tính theo market.
 - `roi_buy_notional`: `trading_pnl / total_buy_notional`. Đây là ROI trên toàn bộ tiền đã BUY, nên thấp hơn khi ví mua bán nhiều vòng.
 - `roi_max_capital_at_risk`: `trading_pnl / max_capital_at_risk`. Nếu thiếu lịch sử trades đầy đủ, trường này là best-effort và report sẽ báo `max_capital_at_risk_estimated`.
+- Summary toàn ví dùng các mẫu số rõ ràng: `total_cost_basis`, `total_buy_notional`, `total_max_capital_at_risk`; các alias cũ như `total_pnl`, `total_roi`, `roi_ex_top1` vẫn tồn tại để tương thích.
 - `resolved` / `won`: một market được coi là đã resolve khi có closed position hoặc activity `REDEEM`; kết quả thắng/thua đọc từ `curPrice` (gần 0/1) hoặc dấu của PnL. Open position (kể cả longshot giá ~0) **không** bị coi là đã resolve để tránh nhầm.
 - `outcome_level_edge`: edge tính theo `conditionId + outcome/tokenId`, không trộn YES và NO trong cùng market. PnL vẫn gom ở market-level.
 - `edge_per_share`: `outcome(0/1) − giá vào lệnh`, trung bình trên các outcome đã resolve – đo việc mua dưới giá.
@@ -92,7 +93,7 @@ mypy .
 
 - ROI tổng có thể cao vì một market nhỏ thắng lớn hoặc vì ví đang giữ vị thế unrealized chưa chốt.
 - `roi_ex_top1` / `roi_ex_top3` trả lời câu hỏi: nếu bỏ các market thắng lớn nhất, ví còn có edge không?
-- `top1_contribution_net_pnl = top1_positive_pnl / net_total_pnl` có thể lớn hơn 100%. Ví dụ top1 lời $1,500 nhưng các market khác lỗ $500, net PnL là $1,000, nên contribution là 150%. Đây không phải bug; đó là tín hiệu one-hit wonder rất mạnh.
+- `top1_contribution_net_pnl = top1_positive_pnl / net_total_trading_pnl` có thể lớn hơn 100%. Ví dụ top1 lời $1,500 nhưng các market khác lỗ $500, net PnL là $1,000, nên contribution là 150%. Đây không phải bug; đó là tín hiệu `lucky_or_one_hit_wonder` rất mạnh.
 - `top1_share_of_gross_profit` dùng mẫu số là tổng các market lãi, nên nằm trong 0–100% và đo độ tập trung lợi nhuận theo cách dễ đọc hơn.
 - Không nên copy ví chỉ vì leaderboard PnL cao: PnL có thể đến từ reward, từ một event correlated, từ unrealized PnL, hoặc từ sample quá nhỏ. Hãy xem `confidence_level`, `unmapped_records_count`, `roi_ex_top1`, `roi_ex_top3`, category breakdown và outcome-level edge.
 

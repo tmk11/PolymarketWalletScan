@@ -23,9 +23,10 @@ DEFAULT_SKILL_CONFIG: dict[str, float] = {
     "skilled_median_roi_floor": -0.02,
     "skilled_top1_contribution_max": 0.40,
     "category_skilled_min_markets": 10,
-    "max_unmapped_ratio_medium": 0.05,
+    "max_unmapped_ratio_medium": 0.10,
     "max_other_category_ratio_medium": 0.50,
     "max_unrealized_pnl_ratio_medium": 0.50,
+    "low_confidence_top1_contribution": 0.70,
 }
 
 CATEGORY_ORDER = [
@@ -388,32 +389,32 @@ def aggregate_market_metrics(results: list[dict[str, Any]], config: dict[str, fl
     top5_buy = sum(float(row.get("total_buy_notional") or 0.0) for row in positive_rows[:5])
     positive_profits = [row_pnl(row) for row in positive_rows]
 
-    roi_ex_top1_cost = safe_div(trading_pnl - top1_pnl, cost_basis - top1_cost)
-    roi_ex_top3_cost = safe_div(trading_pnl - top3_pnl, cost_basis - top3_cost)
-    roi_ex_top5_cost = safe_div(trading_pnl - top5_pnl, cost_basis - top5_cost)
-    roi_ex_top1_buy = safe_div(trading_pnl - top1_pnl, buy_notional - top1_buy)
-    roi_ex_top3_buy = safe_div(trading_pnl - top3_pnl, buy_notional - top3_buy)
-    roi_ex_top5_buy = safe_div(trading_pnl - top5_pnl, buy_notional - top5_buy)
+    roi_ex_top1_cost = safe_div_zero(trading_pnl - top1_pnl, cost_basis - top1_cost)
+    roi_ex_top3_cost = safe_div_zero(trading_pnl - top3_pnl, cost_basis - top3_cost)
+    roi_ex_top5_cost = safe_div_zero(trading_pnl - top5_pnl, cost_basis - top5_cost)
+    roi_ex_top1_buy = safe_div_zero(trading_pnl - top1_pnl, buy_notional - top1_buy)
+    roi_ex_top3_buy = safe_div_zero(trading_pnl - top3_pnl, buy_notional - top3_buy)
+    roi_ex_top5_buy = safe_div_zero(trading_pnl - top5_pnl, buy_notional - top5_buy)
 
-    top1_contribution_net = safe_div(top1_pnl, trading_pnl) if trading_pnl > 0 and top1_pnl > 0 else None
-    top3_contribution_net = safe_div(top3_pnl, trading_pnl) if trading_pnl > 0 and top3_pnl > 0 else None
-    top1_share_gross = safe_div(top1_pnl, gross_profit) if gross_profit > 0 else None
-    top3_share_gross = safe_div(top3_pnl, gross_profit) if gross_profit > 0 else None
+    top1_contribution_net = safe_div_zero(top1_pnl, trading_pnl) if trading_pnl > 0 and top1_pnl > 0 else 0.0
+    top3_contribution_net = safe_div_zero(top3_pnl, trading_pnl) if trading_pnl > 0 and top3_pnl > 0 else 0.0
+    top1_share_gross = safe_div_zero(top1_pnl, gross_profit) if gross_profit > 0 else 0.0
+    top3_share_gross = safe_div_zero(top3_pnl, gross_profit) if gross_profit > 0 else 0.0
 
     is_one_hit = any(
         predicate
         for predicate in (
-            top1_contribution_net is not None and top1_contribution_net > config["one_hit_top1_contribution"],
-            roi_ex_top1_cost is not None and roi_ex_top1_cost < 0,
-            roi_ex_top1_buy is not None and roi_ex_top1_buy < 0,
+            top1_contribution_net > config["one_hit_top1_contribution"],
+            roi_ex_top1_cost < 0,
+            roi_ex_top1_buy < 0,
         )
     )
     is_top3_dependent = any(
         predicate
         for predicate in (
-            top3_contribution_net is not None and top3_contribution_net > config["top3_dependency_contribution"],
-            roi_ex_top3_cost is not None and roi_ex_top3_cost < 0,
-            roi_ex_top3_buy is not None and roi_ex_top3_buy < 0,
+            top3_contribution_net > config["top3_dependency_contribution"],
+            roi_ex_top3_cost < 0,
+            roi_ex_top3_buy < 0,
         )
     )
 
@@ -434,14 +435,16 @@ def aggregate_market_metrics(results: list[dict[str, Any]], config: dict[str, fl
         "winning_markets": sum(1 for row in results if row_pnl(row) > 0),
         "losing_markets": sum(1 for row in results if row_pnl(row) < 0),
         "market_win_rate": safe_div(sum(1 for row in results if row_pnl(row) > 0), total_markets) or 0.0,
+        "total_cost_basis": cost_basis,
         "cost_basis": cost_basis,
         "total_buy_notional": buy_notional,
+        "total_max_capital_at_risk": max_capital_at_risk,
         "max_capital_at_risk": max_capital_at_risk,
         "max_capital_at_risk_estimated": any(row.get("max_capital_at_risk_estimated") for row in results),
         "total_current_value": current_value,
-        "roi_cost_basis": safe_div(trading_pnl, cost_basis),
-        "roi_buy_notional": safe_div(trading_pnl, buy_notional),
-        "roi_max_capital_at_risk": safe_div(trading_pnl, max_capital_at_risk),
+        "roi_cost_basis": safe_div_zero(trading_pnl, cost_basis),
+        "roi_buy_notional": safe_div_zero(trading_pnl, buy_notional),
+        "roi_max_capital_at_risk": safe_div_zero(trading_pnl, max_capital_at_risk),
         "roi_ex_top1": roi_ex_top1_cost,
         "roi_ex_top3": roi_ex_top3_cost,
         "roi_ex_top5": roi_ex_top5_cost,
@@ -455,15 +458,15 @@ def aggregate_market_metrics(results: list[dict[str, Any]], config: dict[str, fl
         "top3_contribution_net_pnl": top3_contribution_net,
         "top1_share_of_gross_profit": top1_share_gross,
         "top3_share_of_gross_profit": top3_share_gross,
-        "median_market_roi": median(roi_values) if roi_values else None,
-        "mean_market_roi_unweighted": mean(roi_values) if roi_values else None,
-        "mean_market_roi_cost_weighted": cost_weighted_roi,
-        "mean_market_roi_buy_notional_unweighted": mean(buy_roi_values) if buy_roi_values else None,
-        "profit_factor": safe_div(gross_profit, abs(gross_loss)) if gross_loss < 0 else (None if gross_profit == 0 else float("inf")),
+        "median_market_roi": median(roi_values) if roi_values else 0.0,
+        "mean_market_roi_unweighted": mean(roi_values) if roi_values else 0.0,
+        "mean_market_roi_cost_weighted": cost_weighted_roi or 0.0,
+        "mean_market_roi_buy_notional_unweighted": mean(buy_roi_values) if buy_roi_values else 0.0,
+        "profit_factor": safe_div_zero(gross_profit, abs(gross_loss)) if gross_loss < 0 else (0.0 if gross_profit == 0 else float("inf")),
         "gross_profit": gross_profit,
         "gross_loss": gross_loss,
-        "hhi_profit_concentration": hhi(positive_profits),
-        "gini_profit_concentration": gini(positive_profits),
+        "hhi_profit_concentration": hhi(positive_profits) or 0.0,
+        "gini_profit_concentration": gini(positive_profits) or 0.0,
         "effective_bets": effective_bets(results),
         "max_drawdown": max_drawdown(monthly_pnl),
         "profitable_months_count": profitable_months,
@@ -479,11 +482,15 @@ def aggregate_market_metrics(results: list[dict[str, Any]], config: dict[str, fl
 
 def add_legacy_summary_aliases(summary: dict[str, Any]) -> dict[str, Any]:
     summary["market_count"] = summary["total_markets"]
-    summary["total_cost"] = summary["cost_basis"]
+    summary["total_cost"] = summary["total_cost_basis"]
+    summary["cost_basis"] = summary["total_cost_basis"]
+    summary["max_capital_at_risk"] = summary["total_max_capital_at_risk"]
     summary["total_realized_pnl"] = summary["realized_pnl"]
     summary["total_unrealized_pnl"] = summary["unrealized_pnl"]
     summary["total_pnl"] = summary["trading_pnl"]
     summary["total_roi"] = summary["roi_cost_basis"]
+    summary["roi_ex_top1"] = summary["roi_ex_top1_cost_basis"]
+    summary["roi_ex_top3"] = summary["roi_ex_top3_cost_basis"]
     summary["median_roi"] = summary["median_market_roi"]
     summary["top1_contribution"] = summary["top1_contribution_net_pnl"]
     summary["top3_contribution"] = summary["top3_contribution_net_pnl"]
@@ -510,7 +517,9 @@ def build_category_breakdown(results: list[dict[str, Any]], config: dict[str, fl
                 "market_win_rate": metrics["market_win_rate"],
                 "median_market_roi": metrics["median_market_roi"],
                 "roi_ex_top1": metrics["roi_ex_top1"],
+                "roi_ex_top1_buy_notional": metrics["roi_ex_top1_buy_notional"],
                 "top1_contribution": metrics["top1_contribution_net_pnl"],
+                "top1_contribution_net_pnl": metrics["top1_contribution_net_pnl"],
                 "verdict": verdict,
                 "effective_bets": metrics["effective_bets"],
                 "profit_factor": metrics["profit_factor"],
@@ -541,9 +550,15 @@ def final_verdict(summary: dict[str, Any], category_breakdown: list[dict[str, An
         return "insufficient_data"
     if summary["trading_pnl"] <= 0:
         return "unprofitable"
-    if summary["is_one_hit_wonder"]:
+    if (
+        summary["roi_ex_top1_buy_notional"] < 0
+        or summary["top1_contribution_net_pnl"] > config["one_hit_top1_contribution"]
+        or summary["top3_contribution_net_pnl"] > config["top3_dependency_contribution"]
+    ):
         return "lucky_or_one_hit_wonder"
-    if summary["total_markets"] < 5 or summary["unmapped_records_ratio"] > 0.25:
+    if summary["total_markets"] < 10:
+        return "insufficient_data"
+    if summary["unmapped_records_ratio"] > 0.25:
         return "insufficient_data"
 
     is_skilled = all(
@@ -575,12 +590,14 @@ def confidence_level(summary: dict[str, Any], config: dict[str, float]) -> str:
         return "low"
     if unrealized_ratio(summary) > config["max_unrealized_pnl_ratio_medium"]:
         return "low"
-    if summary["is_one_hit_wonder"] or summary["is_top3_dependent"]:
+    if summary["top1_contribution_net_pnl"] > config["low_confidence_top1_contribution"]:
         return "low"
     other_ratio = safe_div(summary.get("other_markets", 0.0), summary["total_markets"]) or 0.0
     if other_ratio > config["max_other_category_ratio_medium"]:
         return "low"
-    if summary["total_markets"] >= 75 and summary["effective_bets"] >= 50:
+    if summary["warnings"]:
+        return "medium"
+    if summary["total_markets"] >= 50 and summary["effective_bets"] >= 50:
         return "high"
     return "medium"
 
@@ -838,10 +855,13 @@ def explicit_market_key(record: dict[str, Any]) -> str | None:
     for path in (
         ("conditionId",),
         ("condition_id",),
+        ("conditionID",),
         ("metadata", "conditionId"),
         ("metadata", "condition_id"),
+        ("metadata", "conditionID"),
         ("market", "conditionId"),
         ("market", "condition_id"),
+        ("market", "conditionID"),
         ("marketId",),
         ("market_id",),
         ("metadata", "marketId"),
@@ -1073,7 +1093,9 @@ def gini(values: list[float]) -> float | None:
 def market_warnings(ledger: LedgerMetrics, positions: list[dict[str, Any]], closed_positions: list[dict[str, Any]]) -> list[str]:
     warnings: list[str] = []
     if positions and closed_positions:
-        warnings.append("Market has both open and closed records; position realizedPnl is not double-counted.")
+        warnings.append(
+            "possible_overlap_realized_pnl: open position realizedPnl ignored; not double-counted with closed PnL."
+        )
     if ledger.incomplete:
         warnings.append("Trade/activity reconstruction incomplete; API realizedPnl fallback may be used.")
     return warnings
@@ -1152,6 +1174,12 @@ def nested_value(record: dict[str, Any], path: tuple[str, ...]) -> Any:
 def safe_div(numerator: float, denominator: float) -> float | None:
     if denominator == 0:
         return None
+    return numerator / denominator
+
+
+def safe_div_zero(numerator: float, denominator: float) -> float:
+    if denominator <= 0:
+        return 0.0
     return numerator / denominator
 
 

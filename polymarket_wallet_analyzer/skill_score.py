@@ -58,8 +58,24 @@ def compute_skill(
     from .analyzer import DEFAULT_SKILL_CONFIG, build_category_breakdown, build_skill_report
 
     if not summary:
-        summary = {"trading_pnl": 0.0, "total_pnl": 0.0, "verdict": "unprofitable", "confidence_level": "low"}
+        summary = {"trading_pnl": 0.0, "verdict": "insufficient_data", "confidence_level": "low"}
     summary.setdefault("trading_pnl", summary.get("total_pnl", 0.0))
+    summary.setdefault("rewards_pnl", 0.0)
+    summary.setdefault("total_pnl_including_rewards", summary["trading_pnl"] + summary["rewards_pnl"])
+    summary.setdefault("realized_pnl", 0.0)
+    summary.setdefault("unrealized_pnl", 0.0)
+    summary.setdefault("total_cost_basis", summary.get("total_cost", summary.get("cost_basis", 0.0)))
+    summary.setdefault("total_buy_notional", 0.0)
+    summary.setdefault("total_max_capital_at_risk", summary.get("max_capital_at_risk", 0.0))
+    summary.setdefault("roi_cost_basis", summary.get("total_roi", 0.0))
+    summary.setdefault("roi_buy_notional", 0.0)
+    summary.setdefault("roi_max_capital_at_risk", 0.0)
+    summary.setdefault("roi_ex_top1_cost_basis", summary.get("roi_ex_top1", 0.0))
+    summary.setdefault("roi_ex_top3_cost_basis", summary.get("roi_ex_top3", 0.0))
+    summary.setdefault("roi_ex_top5_cost_basis", summary.get("roi_ex_top5", 0.0))
+    summary.setdefault("roi_ex_top1_buy_notional", 0.0)
+    summary.setdefault("roi_ex_top3_buy_notional", 0.0)
+    summary.setdefault("roi_ex_top5_buy_notional", 0.0)
     summary.setdefault("verdict", "unprofitable" if float(summary.get("trading_pnl") or 0.0) <= 0 else "inconclusive")
     summary.setdefault("confidence_level", "low" if _detect_truncation(wallet_data, max_records) else summary.get("skill_confidence", "medium"))
     summary.setdefault("data_truncated", _detect_truncation(wallet_data, max_records))
@@ -69,7 +85,8 @@ def compute_skill(
     summary.setdefault("monthly_pnl", [])
     summary.setdefault("total_markets", len(results))
     summary.setdefault("effective_bets", _breadth_metrics(results)["effective_bets"])
-    summary.setdefault("top1_share_of_gross_profit", None)
+    summary.setdefault("top1_share_of_gross_profit", 0.0)
+    summary.setdefault("top3_share_of_gross_profit", 0.0)
     summary.setdefault("top1_contribution_net_pnl", summary.get("top1_contribution"))
     summary.setdefault("top3_contribution_net_pnl", summary.get("top3_contribution"))
     summary.setdefault("roi_ex_top1", summary.get("roi_ex_top1_cost_basis"))

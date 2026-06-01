@@ -33,29 +33,34 @@ def main() -> int:
     summary = report["summary"]
     skill = report["skill"]
 
-    print(f"Wallet: {summary['wallet']}")
-    print(f"Markets: {summary['market_count']}")
-    print(f"Trading PnL: ${summary['trading_pnl']:,.2f}")
-    print(f"Rewards PnL: ${summary['rewards_pnl']:,.2f}")
-    print(f"Total incl. rewards: ${summary['total_pnl_including_rewards']:,.2f}")
-    print(f"ROI cost basis: {_fmt_pct(summary['roi_cost_basis'])}")
-    print(f"ROI buy notional: {_fmt_pct(summary['roi_buy_notional'])}")
-    print(f"ROI max capital at risk: {_fmt_pct(summary['roi_max_capital_at_risk'])}")
-    print(f"Win rate: {_fmt_pct(summary['market_win_rate'])}")
-    print(f"Median market ROI: {_fmt_pct(summary['median_market_roi'])}")
-    print(f"ROI ex top1/top3/top5 buy: {_fmt_pct(summary['roi_ex_top1_buy_notional'])} / {_fmt_pct(summary['roi_ex_top3_buy_notional'])} / {_fmt_pct(summary['roi_ex_top5_buy_notional'])}")
-    print(f"Top1 contribution net PnL: {_fmt_pct(summary['top1_contribution_net_pnl'])}")
-    print(f"Top1 share of gross profit: {_fmt_pct(summary['top1_share_of_gross_profit'])}")
-    print(f"Unmapped records: {summary['unmapped_records_count']}")
-    print(f"Top market: {summary['top_market_title']} (${summary['top_market_pnl']:,.2f})")
+    print(f"Wallet: {summary.get('wallet')}")
+    print(f"Markets: {summary.get('market_count', summary.get('total_markets', 0))}")
+    print(f"Trading PnL: ${summary.get('trading_pnl', 0.0):,.2f}")
+    print(f"Rewards PnL: ${summary.get('rewards_pnl', 0.0):,.2f}")
+    print(f"Total incl. rewards: ${summary.get('total_pnl_including_rewards', 0.0):,.2f}")
+    print(f"ROI cost basis: {_fmt_pct(summary.get('roi_cost_basis'))}")
+    print(f"ROI buy notional: {_fmt_pct(summary.get('roi_buy_notional'))}")
+    print(f"ROI max capital at risk: {_fmt_pct(summary.get('roi_max_capital_at_risk'))}")
+    print(f"Win rate: {_fmt_pct(summary.get('market_win_rate'))}")
+    print(f"Median market ROI: {_fmt_pct(summary.get('median_market_roi'))}")
+    print(
+        "ROI ex top1/top3/top5 buy: "
+        f"{_fmt_pct(summary.get('roi_ex_top1_buy_notional'))} / "
+        f"{_fmt_pct(summary.get('roi_ex_top3_buy_notional'))} / "
+        f"{_fmt_pct(summary.get('roi_ex_top5_buy_notional'))}"
+    )
+    print(f"Top1 contribution net PnL: {_fmt_pct(summary.get('top1_contribution_net_pnl'))}")
+    print(f"Top1 share of gross profit: {_fmt_pct(summary.get('top1_share_of_gross_profit'))}")
+    print(f"Unmapped records: {summary.get('unmapped_records_count', 0)}")
+    print(f"Top market: {summary.get('top_market_title', '')} (${summary.get('top_market_pnl', 0.0):,.2f})")
 
     print()
-    score = skill["skill_score"]
-    print(f"Skill score: {score if score is not None else 'N/A'}/100  [{skill['verdict_label']}]")
-    print(f"Confidence: {skill['confidence']}" + ("  (DỮ LIỆU BỊ CẮT)" if skill["data_truncated"] else ""))
-    print(f"-> {skill['verdict_detail']}")
+    score = skill.get("skill_score")
+    print(f"Skill score: {score if score is not None else 'N/A'}/100  [{skill.get('verdict_label', 'N/A')}]")
+    print(f"Confidence: {skill.get('confidence', 'medium')}" + ("  (DỮ LIỆU BỊ CẮT)" if skill.get("data_truncated") else ""))
+    print(f"-> {skill.get('verdict_detail', '')}")
     print("Breakdown:")
-    for component in skill["components"]:
+    for component in skill.get("components", []):
         score_txt = "N/A" if component["normalized"] is None else f"{component['normalized'] * 100:5.0f}%"
         contribution = component["contribution"]
         contribution_txt = "  -  " if contribution is None else f"+{contribution:.1f}"
@@ -63,9 +68,9 @@ def main() -> int:
 
     print()
     print("Legacy rules:")
-    print(f"  One-hit wonder: {summary['is_one_hit_wonder']}")
-    print(f"  Top3 dependent: {summary['is_top3_dependent']}")
-    print(f"  Probably skilled: {summary['is_probably_skilled']}")
+    print(f"  One-hit wonder: {summary.get('is_one_hit_wonder')}")
+    print(f"  Top3 dependent: {summary.get('is_top3_dependent')}")
+    print(f"  Probably skilled: {summary.get('is_probably_skilled')}")
     print()
     print(f"Category read: {summary.get('category_skill_summary', '')}")
     if report.get("warnings"):
