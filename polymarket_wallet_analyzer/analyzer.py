@@ -75,6 +75,7 @@ def analyze_wallet(
     category_breakdown = build_category_breakdown(markets, config)
     summary = summarize_results(markets, wallet_data, grouped.unmapped_records, warnings, max_records, config)
     summary["verdict"] = final_verdict(summary, category_breakdown, config)
+    warnings = summary["warnings"]
     summary["skill_verdict"] = summary["verdict"]
     summary["skill_verdict_label"] = verdict_label(summary["verdict"])
     summary["category_skill_summary"] = category_skill_sentence(category_breakdown)
@@ -356,6 +357,11 @@ def summarize_results(
             "warnings": warnings or [],
         }
     )
+    if low_sample_one_hit_pattern(summary, config):
+        summary["warnings"].append(
+            "low_sample_one_hit_pattern_detected: top market concentration/ROI ex-top1 looks one-hit-like, "
+            "but sample size is too small for a lucky verdict."
+        )
     summary["confidence_level"] = confidence_level(summary, config)
     summary["skill_confidence"] = summary["confidence_level"]
     return add_legacy_summary_aliases(summary)
@@ -548,15 +554,11 @@ def category_verdict(metrics: dict[str, Any], config: dict[str, float]) -> str:
 def final_verdict(summary: dict[str, Any], category_breakdown: list[dict[str, Any]], config: dict[str, float]) -> str:
     if summary["total_markets"] == 0:
         return "insufficient_data"
+    if summary["total_markets"] < 10:
+        return "insufficient_data"
     if summary["trading_pnl"] <= 0:
         return "unprofitable"
-    if (
-        summary["roi_ex_top1_buy_notional"] < 0
-        or summary["top1_contribution_net_pnl"] > config["one_hit_top1_contribution"]
-        or summary["top3_contribution_net_pnl"] > config["top3_dependency_contribution"]
-    ):
-        return "lucky_or_one_hit_wonder"
-    if summary["total_markets"] < 10:
+    if summary["confidence_level"] == "low" and summary["total_markets"] < config["skilled_min_markets"]:
         return "insufficient_data"
     if summary["unmapped_records_ratio"] > 0.25:
         return "insufficient_data"
@@ -578,7 +580,23 @@ def final_verdict(summary: dict[str, Any], category_breakdown: list[dict[str, An
         return "skilled"
     if any(row["verdict"] == "skilled" and row["category"] != "Other" for row in category_breakdown):
         return "category_skilled"
+    if (
+        summary["roi_ex_top1_buy_notional"] < 0
+        or summary["top1_contribution_net_pnl"] > config["one_hit_top1_contribution"]
+        or summary["top3_contribution_net_pnl"] > config["top3_dependency_contribution"]
+    ):
+        return "lucky_or_one_hit_wonder"
     return "inconclusive"
+
+
+def low_sample_one_hit_pattern(summary: dict[str, Any], config: dict[str, float]) -> bool:
+    if summary["total_markets"] >= 10 or summary["trading_pnl"] <= 0:
+        return False
+    return (
+        summary["roi_ex_top1_buy_notional"] < 0
+        or summary["top1_contribution_net_pnl"] > config["one_hit_top1_contribution"]
+        or summary["top3_contribution_net_pnl"] > config["top3_dependency_contribution"]
+    )
 
 
 def confidence_level(summary: dict[str, Any], config: dict[str, float]) -> str:
@@ -1092,9 +1110,12 @@ def gini(values: list[float]) -> float | None:
 
 def market_warnings(ledger: LedgerMetrics, positions: list[dict[str, Any]], closed_positions: list[dict[str, Any]]) -> list[str]:
     warnings: list[str] = []
-    if positions and closed_positions:
+    position_realized = sum(num(record, "realizedPnl", "realized_pnl") for record in positions)
+    closed_realized = sum(num(record, "realizedPnl", "realized_pnl") for record in closed_positions)
+    if positions and closed_positions and position_realized != 0 and closed_realized != 0:
         warnings.append(
-            "possible_overlap_realized_pnl: open position realizedPnl ignored; not double-counted with closed PnL."
+            "possible_overlap_realized_pnl: market has both open positions and closed positions with realizedPnl; "
+            "analyzer avoided double-counting by choosing a single realized PnL source"
         )
     if ledger.incomplete:
         warnings.append("Trade/activity reconstruction incomplete; API realizedPnl fallback may be used.")

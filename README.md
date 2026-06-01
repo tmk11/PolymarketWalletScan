@@ -71,31 +71,49 @@ mypy .
 
 ## Cách tính chính
 
-- `trading_pnl`: PnL từ giao dịch prediction market, bằng `realized_pnl + unrealized_pnl`, không bao gồm reward mặc định.
-- `rewards_pnl`: reward/maker rebate/referral rebate từ activity, tách riêng khỏi trading skill.
-- `total_pnl_including_rewards`: `trading_pnl + rewards_pnl`, hữu ích để xem tổng tiền nhưng không dùng mặc định để chấm skill.
-- `realized_pnl`: phần đã chốt từ SELL/REDEEM/closed records. Nếu một market có cả open và closed records, app không cộng trùng `realizedPnl` từ open position.
-- `unrealized_pnl`: phần đang mở, ưu tiên `cashPnl`, fallback `currentValue - initialValue`.
-- `asset/token_id`: là outcome-level token (YES/NO). App chỉ dùng token để map về `conditionId`; nếu không map được thì record vào `unmapped_records` và không dùng cho verdict chính thức.
-- `roi_cost_basis`: `trading_pnl / cost_basis`. Đây là ROI trên vốn gốc/cost basis ước tính theo market.
-- `roi_buy_notional`: `trading_pnl / total_buy_notional`. Đây là ROI trên toàn bộ tiền đã BUY, nên thấp hơn khi ví mua bán nhiều vòng.
-- `roi_max_capital_at_risk`: `trading_pnl / max_capital_at_risk`. Nếu thiếu lịch sử trades đầy đủ, trường này là best-effort và report sẽ báo `max_capital_at_risk_estimated`.
-- Summary toàn ví dùng các mẫu số rõ ràng: `total_cost_basis`, `total_buy_notional`, `total_max_capital_at_risk`; các alias cũ như `total_pnl`, `total_roi`, `roi_ex_top1` vẫn tồn tại để tương thích.
-- `resolved` / `won`: một market được coi là đã resolve khi có closed position hoặc activity `REDEEM`; kết quả thắng/thua đọc từ `curPrice` (gần 0/1) hoặc dấu của PnL. Open position (kể cả longshot giá ~0) **không** bị coi là đã resolve để tránh nhầm.
+### PnL
+
+- `trading_pnl = realized_pnl + unrealized_pnl`: PnL từ trading prediction market, không bao gồm reward mặc định.
+- `realized_pnl`: PnL đã chốt. Analyzer ưu tiên reconstruction từ trades/activity khi đủ dữ liệu; nếu không đủ thì dùng best-effort từ `closed_positions` hoặc `positions`, nhưng tránh double-count khi cùng market có cả open và closed records.
+- `unrealized_pnl`: PnL tạm tính của open positions, ưu tiên `cashPnl`/`unrealizedPnl`, fallback `currentValue - initialValue`.
+- `rewards_pnl`: rewards/maker rebates/referral rebates, tách riêng khỏi trading skill.
+- `total_pnl_including_rewards = trading_pnl + rewards_pnl`: dùng để xem tổng tiền, không phải metric mặc định để chấm skill.
+- Nếu market có cả open positions và closed positions đều chứa `realizedPnl`, report thêm warning `possible_overlap_realized_pnl` và chỉ chọn một nguồn realized PnL để tránh cộng trùng.
+
+### ROI
+
+- `roi_cost_basis = trading_pnl / total_cost_basis`: ROI trên vốn gốc/cost basis ước tính.
+- `roi_buy_notional = trading_pnl / total_buy_notional`: ROI trên toàn bộ tiền đã BUY, bao gồm mua bán nhiều vòng; thường bảo thủ hơn khi ví turnover nhiều.
+- `roi_max_capital_at_risk = trading_pnl / total_max_capital_at_risk`: ROI trên vốn rủi ro lớn nhất tại một thời điểm; nếu thiếu full trade timeline thì là best-effort và report sẽ cảnh báo.
+- `roi_ex_top1` / `roi_ex_top3` / `roi_ex_top5`: ROI sau khi loại các market thắng lớn nhất, giúp kiểm tra ví còn edge không nếu bỏ outlier.
+- Các alias cũ như `total_pnl`, `total_roi`, `roi_ex_top1`, `top1_contribution` vẫn tồn tại để tương thích, nhưng code mới ưu tiên field rõ nghĩa hơn.
+
+### Market key
+
+- Analyzer ưu tiên market-level identifiers: `conditionId`, `condition_id`, `conditionID`, `marketId`, `market_id`, `marketSlug`, `slug`.
+- `asset`/`token_id` là outcome-level token như YES/NO, nên không được dùng làm market key nếu chưa map được về `conditionId`.
+- Record không map được sẽ vào `unmapped_records`, tăng `unmapped_records_count`, có warning, và không dùng để kết luận skill chính thức.
+
+### Top contribution
+
+- `top1_contribution_net_pnl = top1_positive_pnl / net_total_trading_pnl` có thể lớn hơn 100% nếu market thắng lớn đang bù lỗ cho các market khác. Ví dụ top1 lời $1,500, các market khác lỗ $500, net PnL $1,000 → contribution 150%. Đây là tín hiệu one-hit wonder, không phải bug.
+- `top1_share_of_gross_profit = top1_positive_pnl / gross_positive_pnl` dùng tổng gross profit làm mẫu số nên dễ đọc hơn và nằm trong 0–100%.
+
+### Verdict
+
+- `insufficient_data`: quá ít market hoặc dữ liệu không đủ để kết luận. Với sample nhỏ (<10 market), analyzer không kết luận chắc là lucky dù có pattern one-hit; thay vào đó thêm warning `low_sample_one_hit_pattern_detected` nếu thấy tín hiệu này.
+- `lucky_or_one_hit_wonder`: ví có lời nhưng lợi nhuận phụ thuộc quá nhiều vào một vài market lớn, hoặc ROI ex-top1/ex-top3 âm trên sample đủ lớn.
+- `category_skilled`: không skilled toàn bộ nhưng có dấu hiệu skill ở một category cụ thể.
+- `skilled`: có lợi nhuận phân tán, đủ mẫu, `roi_ex_top1`/`roi_ex_top3` vẫn ổn, win rate/median ROI hợp lý và confidence không thấp.
+- `unprofitable`: trading PnL không dương trên sample đủ để đọc.
+- `resolved` / `won`: một market được coi là resolved khi có closed position hoặc activity `REDEEM`; open longshot chưa resolve không bị coi là thua.
 - `outcome_level_edge`: edge tính theo `conditionId + outcome/tokenId`, không trộn YES và NO trong cùng market. PnL vẫn gom ở market-level.
-- `edge_per_share`: `outcome(0/1) − giá vào lệnh`, trung bình trên các outcome đã resolve – đo việc mua dưới giá.
-- `skill_score` (0–100): trung bình có trọng số của 6 thành phần (ý nghĩa thống kê 25, edge 20, ổn định theo thời gian 15, số quyết định độc lập 15, không phụ thuộc 1 kèo 15, hiệu suất điều chỉnh rủi ro 10); trọng số được chuẩn hóa lại khi thiếu dữ liệu cho một thành phần.
-- `market_win_rate`, `median_market_roi`, `mean_market_roi_unweighted`, `mean_market_roi_cost_weighted`, `profit_factor`, `hhi_profit_concentration`, `gini_profit_concentration`, `effective_bets`, `max_drawdown`, `profitable_months_count`, `total_active_months` giúp kiểm tra độ ổn định thay vì chỉ nhìn leaderboard PnL.
-- Verdict: `skilled` khi ví có lãi bền trên nhiều market, ROI buy-notional dương sau khi bỏ top1/top3, win rate/median ROI ổn và confidence không thấp. `category_skilled` khi edge chỉ rõ ở một vài category. `lucky_or_one_hit_wonder` khi lãi phụ thuộc top market/top3. `unprofitable` khi trading PnL không dương. `insufficient_data` khi quá ít dữ liệu hoặc unmapped quá nhiều.
-- Hai cờ cũ `one-hit wonder` / `probably skilled` vẫn được giữ để tương thích ngược; `skill.legacy_verdict` map verdict mới về nhãn cũ khi cần.
 
 ## Vì sao không chỉ nhìn ROI tổng?
 
 - ROI tổng có thể cao vì một market nhỏ thắng lớn hoặc vì ví đang giữ vị thế unrealized chưa chốt.
 - `roi_ex_top1` / `roi_ex_top3` trả lời câu hỏi: nếu bỏ các market thắng lớn nhất, ví còn có edge không?
-- `top1_contribution_net_pnl = top1_positive_pnl / net_total_trading_pnl` có thể lớn hơn 100%. Ví dụ top1 lời $1,500 nhưng các market khác lỗ $500, net PnL là $1,000, nên contribution là 150%. Đây không phải bug; đó là tín hiệu `lucky_or_one_hit_wonder` rất mạnh.
-- `top1_share_of_gross_profit` dùng mẫu số là tổng các market lãi, nên nằm trong 0–100% và đo độ tập trung lợi nhuận theo cách dễ đọc hơn.
-- Không nên copy ví chỉ vì leaderboard PnL cao: PnL có thể đến từ reward, từ một event correlated, từ unrealized PnL, hoặc từ sample quá nhỏ. Hãy xem `confidence_level`, `unmapped_records_count`, `roi_ex_top1`, `roi_ex_top3`, category breakdown và outcome-level edge.
+- Không nên copy ví chỉ vì leaderboard PnL cao: PnL có thể đến từ reward, từ một event correlated, từ unrealized PnL, từ sample quá nhỏ, hoặc từ dữ liệu bị truncate. Hãy xem `confidence_level`, `unmapped_records_count`, `roi_ex_top1`, `roi_ex_top3`, category breakdown và outcome-level edge.
 
 ## Cấu trúc JSON report
 

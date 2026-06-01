@@ -73,7 +73,7 @@ def test_no_double_count_when_open_and_closed_share_market() -> None:
     assert market["realized_pnl"] == 100
     assert market["unrealized_pnl"] == 10
     assert market["trading_pnl"] == 110
-    assert "not double-counted" in market["warnings"][0]
+    assert "possible_overlap_realized_pnl" in market["warnings"][0]
 
 
 def test_lucky_one_large_event_is_flagged() -> None:
@@ -89,7 +89,8 @@ def test_lucky_one_large_event_is_flagged() -> None:
 
     assert summary["trading_pnl"] == 1000
     assert summary["top1_contribution_net_pnl"] == 1.5
-    assert summary["verdict"] == "lucky_or_one_hit_wonder"
+    assert summary["verdict"] == "insufficient_data"
+    assert any("low_sample_one_hit_pattern_detected" in warning for warning in summary["warnings"])
     assert summary["is_one_hit_wonder"] is True
 
 

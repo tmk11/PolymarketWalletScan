@@ -279,7 +279,8 @@ def test_top1_contribution_above_100_percent_is_not_capped() -> None:
     assert summary["trading_pnl"] == 1000
     assert summary["top1_contribution_net_pnl"] == 1.5
     assert summary["top1_share_of_gross_profit"] == 1.0
-    assert summary["verdict"] == "lucky_or_one_hit_wonder"
+    assert summary["verdict"] == "insufficient_data"
+    assert any("low_sample_one_hit_pattern_detected" in warning for warning in summary["warnings"])
 
 
 def test_roi_ex_top1_buy_notional_negative_flags_lucky() -> None:
@@ -294,7 +295,17 @@ def test_roi_ex_top1_buy_notional_negative_flags_lucky() -> None:
     )["summary"]
 
     assert summary["roi_ex_top1_buy_notional"] < 0
-    assert summary["verdict"] == "lucky_or_one_hit_wonder"
+    assert summary["verdict"] == "insufficient_data"
+    assert any("low_sample_one_hit_pattern_detected" in warning for warning in summary["warnings"])
+
+
+def test_single_market_big_win_is_insufficient_data_not_lucky() -> None:
+    summary = analyze_wallet(_test_wallet(closed_positions=[_closed_pnl_market("A", 1500, buy_notional=1000)]))["summary"]
+
+    assert summary["total_markets"] == 1
+    assert summary["top1_contribution_net_pnl"] == 1.0
+    assert summary["verdict"] == "insufficient_data"
+    assert any("low_sample_one_hit_pattern_detected" in warning for warning in summary["warnings"])
 
 
 def test_evenly_profitable_50_market_wallet_is_skilled() -> None:
