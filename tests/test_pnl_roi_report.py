@@ -210,3 +210,17 @@ def test_roi_buy_notional_differs_from_cost_basis_for_round_trips() -> None:
     assert market["total_buy_notional"] == 100
     assert market["roi_cost_basis"] == 0.6
     assert market["roi_buy_notional"] == 0.3
+
+
+def test_skill_report_keeps_legacy_ui_sections() -> None:
+    report = analyze_wallet(_wallet(closed_positions=[_closed_market("legacy", 50, cost=100)]))
+    skill = report["skill"]
+
+    assert "significance" in skill
+    assert "risk" in skill
+    assert "breadth" in skill
+    assert "consistency" in skill
+    assert "edge" in skill
+    assert "ci_low" in skill["significance"]
+    assert "sharpe" in skill["risk"]
+    assert "profit_factor" in skill["risk"]

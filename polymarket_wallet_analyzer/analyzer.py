@@ -640,10 +640,29 @@ def build_skill_report(
         },
         "breadth": {"market_count": summary["total_markets"], "effective_bets": summary["effective_bets"]},
         "concentration": {
+            "top1_contribution": summary["top1_contribution_net_pnl"],
+            "top3_contribution": summary["top3_contribution_net_pnl"],
+            "roi_ex_top1": summary["roi_ex_top1"],
             "top1_contribution_net_pnl": summary["top1_contribution_net_pnl"],
             "top3_contribution_net_pnl": summary["top3_contribution_net_pnl"],
             "hhi": summary["hhi_profit_concentration"],
             "gini": summary["gini_profit_concentration"],
+        },
+        "significance": {
+            "n": summary["total_markets"],
+            "mean_roi": summary["mean_market_roi_unweighted"],
+            "std_roi": None,
+            "t_stat": None,
+            "ci_low": None,
+            "ci_high": None,
+            "significant": False,
+        },
+        "risk": {
+            "sharpe": None,
+            "profit_factor": summary["profit_factor"],
+            "gross_profit": summary["gross_profit"],
+            "gross_loss": summary["gross_loss"],
+            "max_drawdown": summary["max_drawdown"],
         },
     }
 
