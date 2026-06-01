@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import argparse
 import csv
+import json
+import math
 import sys
 from pathlib import Path
 
@@ -14,6 +16,7 @@ def main() -> int:
     parser.add_argument("wallet", help="EVM wallet/proxy wallet address, e.g. 0x...")
     parser.add_argument("--max-records", type=int, default=5000, help="Max records per Data API endpoint")
     parser.add_argument("--csv", type=Path, help="Optional path to export market rows as CSV")
+    parser.add_argument("--json", type=Path, help="Optional path to export the full report as JSON")
     args = parser.parse_args()
 
     client = PolymarketClient()
@@ -32,11 +35,18 @@ def main() -> int:
 
     print(f"Wallet: {summary['wallet']}")
     print(f"Markets: {summary['market_count']}")
-    print(f"Total cost: ${summary['total_cost']:,.2f}")
-    print(f"Total PnL: ${summary['total_pnl']:,.2f}")
-    print(f"Total ROI: {_fmt_pct(summary['total_roi'])}")
+    print(f"Trading PnL: ${summary['trading_pnl']:,.2f}")
+    print(f"Rewards PnL: ${summary['rewards_pnl']:,.2f}")
+    print(f"Total incl. rewards: ${summary['total_pnl_including_rewards']:,.2f}")
+    print(f"ROI cost basis: {_fmt_pct(summary['roi_cost_basis'])}")
+    print(f"ROI buy notional: {_fmt_pct(summary['roi_buy_notional'])}")
+    print(f"ROI max capital at risk: {_fmt_pct(summary['roi_max_capital_at_risk'])}")
     print(f"Win rate: {_fmt_pct(summary['market_win_rate'])}")
-    print(f"Median ROI: {_fmt_pct(summary['median_roi'])}")
+    print(f"Median market ROI: {_fmt_pct(summary['median_market_roi'])}")
+    print(f"ROI ex top1/top3/top5 buy: {_fmt_pct(summary['roi_ex_top1_buy_notional'])} / {_fmt_pct(summary['roi_ex_top3_buy_notional'])} / {_fmt_pct(summary['roi_ex_top5_buy_notional'])}")
+    print(f"Top1 contribution net PnL: {_fmt_pct(summary['top1_contribution_net_pnl'])}")
+    print(f"Top1 share of gross profit: {_fmt_pct(summary['top1_share_of_gross_profit'])}")
+    print(f"Unmapped records: {summary['unmapped_records_count']}")
     print(f"Top market: {summary['top_market_title']} (${summary['top_market_pnl']:,.2f})")
 
     print()
@@ -54,11 +64,23 @@ def main() -> int:
     print()
     print("Legacy rules:")
     print(f"  One-hit wonder: {summary['is_one_hit_wonder']}")
+    print(f"  Top3 dependent: {summary['is_top3_dependent']}")
     print(f"  Probably skilled: {summary['is_probably_skilled']}")
+    print()
+    print(f"Category read: {summary.get('category_skill_summary', '')}")
+    if report.get("warnings"):
+        print("Warnings:")
+        for warning in report["warnings"]:
+            print(f"  - {warning}")
 
     if args.csv:
         export_csv(report["markets"], args.csv)
         print(f"Exported CSV: {args.csv}")
+
+    if args.json:
+        args.json.parent.mkdir(parents=True, exist_ok=True)
+        args.json.write_text(json.dumps(json_safe(report), ensure_ascii=False, indent=2, allow_nan=False), encoding="utf-8")
+        print(f"Exported JSON: {args.json}")
 
     return 0
 
@@ -78,6 +100,16 @@ def _fmt_pct(value: float | None) -> str:
     if value is None:
         return "N/A"
     return f"{value * 100:,.2f}%"
+
+
+def json_safe(value):
+    if isinstance(value, dict):
+        return {key: json_safe(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [json_safe(item) for item in value]
+    if isinstance(value, float) and not math.isfinite(value):
+        return None
+    return value
 
 
 if __name__ == "__main__":

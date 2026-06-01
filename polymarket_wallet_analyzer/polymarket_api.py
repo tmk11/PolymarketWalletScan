@@ -7,7 +7,6 @@ from typing import Any
 
 import requests
 
-
 DATA_API_BASE_URL = "https://data-api.polymarket.com"
 GAMMA_API_BASE_URL = "https://gamma-api.polymarket.com"
 WALLET_RE = re.compile(r"^0x[a-fA-F0-9]{40}$")

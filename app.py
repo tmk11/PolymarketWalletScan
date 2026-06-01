@@ -8,7 +8,6 @@ import streamlit as st
 from polymarket_wallet_analyzer.analyzer import analyze_wallet
 from polymarket_wallet_analyzer.polymarket_api import PolymarketAPIError, PolymarketClient, validate_wallet
 
-
 st.set_page_config(page_title="Polymarket Wallet Analyzer", page_icon="📈", layout="wide")
 
 
@@ -77,25 +76,34 @@ if skill["data_truncated"]:
 
 st.subheader("Tổng quan")
 metric_cols = st.columns(5)
-metric_cols[0].metric("Tổng PnL", money(summary["total_pnl"]))
-metric_cols[1].metric("Tổng ROI", pct(summary["total_roi"]))
+metric_cols[0].metric("Trading PnL", money(summary["trading_pnl"]))
+metric_cols[1].metric("ROI buy notional", pct(summary["roi_buy_notional"]))
 metric_cols[2].metric("Win rate", pct(summary["market_win_rate"]))
 metric_cols[3].metric("Số market", f"{summary['market_count']:,}")
-metric_cols[4].metric("Median ROI", pct(summary["median_roi"]))
+metric_cols[4].metric("Verdict", summary["verdict"])
 
 metric_cols = st.columns(5)
-metric_cols[0].metric("Cost basis", money(summary["total_cost"]))
-metric_cols[1].metric("Current value", money(summary["total_current_value"]))
+metric_cols[0].metric("ROI cost basis", pct(summary["roi_cost_basis"]))
+metric_cols[1].metric("ROI ex top1", pct(summary["roi_ex_top1_buy_notional"]))
 metric_cols[2].metric("Realized PnL", money(summary["total_realized_pnl"]))
 metric_cols[3].metric("Unrealized PnL", money(summary["total_unrealized_pnl"]))
-metric_cols[4].metric("Traded API", money(summary["traded_api"]))
+metric_cols[4].metric("Rewards PnL", money(summary["rewards_pnl"]))
+
+metric_cols = st.columns(5)
+metric_cols[0].metric("Top1/net PnL", pct(summary["top1_contribution_net_pnl"]))
+metric_cols[1].metric("Top1/gross profit", pct(summary["top1_share_of_gross_profit"]))
+metric_cols[2].metric("Profit factor", "∞" if summary["profit_factor"] == float("inf") else f"{summary['profit_factor']:.2f}" if summary["profit_factor"] is not None else "N/A")
+metric_cols[3].metric("Confidence", summary["confidence_level"])
+metric_cols[4].metric("Unmapped", f"{summary['unmapped_records_count']:,}")
 
 st.subheader("🎯 Skilled hay Ăn may?")
 
 verdict_styles = {
     "skilled": st.success,
-    "lucky": st.warning,
+    "category_skilled": st.success,
+    "lucky_or_one_hit_wonder": st.warning,
     "unprofitable": st.error,
+    "insufficient_data": st.warning,
     "inconclusive": st.info,
 }
 confidence_labels = {"high": "Độ tin cậy cao", "medium": "Độ tin cậy trung bình", "low": "Độ tin cậy thấp"}
@@ -128,6 +136,7 @@ if score is not None:
     gauge_col.plotly_chart(gauge, use_container_width=True)
 
 verdict_box(f"**{skill['verdict_label']}** — {skill['verdict_detail']}")
+st.caption(summary.get("category_skill_summary", ""))
 
 st.markdown("**Vì sao có điểm này?** (đóng góp của từng tiêu chí vào tổng điểm)")
 breakdown_rows = [
@@ -188,17 +197,22 @@ if len(monthly) >= 2:
 
 st.subheader("Chi tiết tập trung lợi nhuận")
 detail_cols = st.columns(4)
-detail_cols[0].metric("Top 1 contribution", pct(summary["top1_contribution"]))
-detail_cols[1].metric("Top 3 contribution", pct(summary["top3_contribution"]))
-detail_cols[2].metric("ROI ex top 1", pct(summary["roi_ex_top1"]))
-detail_cols[3].metric("ROI ex top 3", pct(summary["roi_ex_top3"]))
+detail_cols[0].metric("Top1/net PnL", pct(summary["top1_contribution_net_pnl"]))
+detail_cols[1].metric("Top3/net PnL", pct(summary["top3_contribution_net_pnl"]))
+detail_cols[2].metric("ROI ex top1 buy", pct(summary["roi_ex_top1_buy_notional"]))
+detail_cols[3].metric("ROI ex top3 buy", pct(summary["roi_ex_top3_buy_notional"]))
+
+if report.get("warnings"):
+    with st.expander("Cảnh báo dữ liệu"):
+        for warning in report["warnings"]:
+            st.warning(warning)
 
 if df.empty:
     st.warning("Không tìm thấy market nào cho ví này trong dữ liệu API trả về.")
     st.stop()
 
 display_df = df.copy()
-display_df["roi_pct"] = display_df["roi"].map(lambda value: value * 100 if value is not None else None)
+display_df["roi_pct"] = display_df["roi_cost_basis"].map(lambda value: value * 100 if value is not None else None)
 
 chart_cols = st.columns(2)
 top_pnl = display_df.sort_values("pnl", ascending=False).head(15)
@@ -239,17 +253,37 @@ st.plotly_chart(
     use_container_width=True,
 )
 
+st.subheader("Phân tích theo category")
+category_breakdown_df = pd.DataFrame(report.get("category_breakdown", []))
+if not category_breakdown_df.empty:
+    st.dataframe(
+        category_breakdown_df,
+        use_container_width=True,
+        column_config={
+            "trading_pnl": st.column_config.NumberColumn("Trading PnL", format="$%.2f"),
+            "roi_cost_basis": st.column_config.NumberColumn("ROI cost", format="%.2%"),
+            "roi_buy_notional": st.column_config.NumberColumn("ROI buy", format="%.2%"),
+            "market_win_rate": st.column_config.NumberColumn("Win rate", format="%.2%"),
+            "median_market_roi": st.column_config.NumberColumn("Median ROI", format="%.2%"),
+            "roi_ex_top1": st.column_config.NumberColumn("ROI ex top1", format="%.2%"),
+            "top1_contribution": st.column_config.NumberColumn("Top1/net", format="%.2%"),
+        },
+    )
+
 st.subheader("Bảng market")
 columns = [
     "title",
     "category",
     "outcomes",
-    "cost",
+    "cost_basis",
+    "total_buy_notional",
+    "max_capital_at_risk",
     "proceeds",
     "current_value",
     "realized_pnl",
     "unrealized_pnl",
-    "pnl",
+    "rewards_pnl",
+    "trading_pnl",
     "roi_pct",
     "trade_count",
     "open_positions",
@@ -260,12 +294,15 @@ st.dataframe(
     display_df[columns],
     use_container_width=True,
     column_config={
-        "cost": st.column_config.NumberColumn("Cost", format="$%.2f"),
+        "cost_basis": st.column_config.NumberColumn("Cost basis", format="$%.2f"),
+        "total_buy_notional": st.column_config.NumberColumn("Buy notional", format="$%.2f"),
+        "max_capital_at_risk": st.column_config.NumberColumn("Max capital", format="$%.2f"),
         "proceeds": st.column_config.NumberColumn("Proceeds", format="$%.2f"),
         "current_value": st.column_config.NumberColumn("Current", format="$%.2f"),
         "realized_pnl": st.column_config.NumberColumn("Realized", format="$%.2f"),
         "unrealized_pnl": st.column_config.NumberColumn("Unrealized", format="$%.2f"),
-        "pnl": st.column_config.NumberColumn("PnL", format="$%.2f"),
+        "rewards_pnl": st.column_config.NumberColumn("Rewards", format="$%.2f"),
+        "trading_pnl": st.column_config.NumberColumn("Trading PnL", format="$%.2f"),
         "roi_pct": st.column_config.NumberColumn("ROI", format="%.2f%%"),
     },
 )

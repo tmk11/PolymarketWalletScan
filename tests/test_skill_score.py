@@ -78,7 +78,7 @@ def test_skilled_wallet_scores_high_and_has_positive_edge() -> None:
     assert skill["breadth"]["effective_bets"] == 20
     assert skill["skill_score"] is not None
     assert skill["skill_score"] >= 60
-    assert skill["verdict"] in {"skilled", "inconclusive"}
+    assert skill["verdict"] in {"skilled", "category_skilled", "inconclusive"}
     # Components renormalise to the final score.
     contributions = [c["contribution"] for c in skill["components"] if c["contribution"] is not None]
     assert abs(sum(contributions) - skill["skill_score"]) <= 1.5
@@ -96,7 +96,7 @@ def test_one_hit_wonder_flagged_as_lucky() -> None:
 
     assert summary["total_pnl"] > 0
     assert summary["top1_contribution"] > 0.5
-    assert skill["verdict"] == "lucky"
+    assert skill["verdict"] == "lucky_or_one_hit_wonder"
     assert skill["skill_score"] < 60
 
 

@@ -33,7 +33,6 @@ from typing import Any, Sequence
 
 from .polymarket_api import WalletData
 
-
 # Relative weight of each component in the composite score (renormalised when a
 # component cannot be computed for a given wallet).
 COMPONENT_WEIGHTS: dict[str, float] = {
@@ -55,36 +54,32 @@ def compute_skill(
     summary: dict[str, Any],
     max_records: int | None = None,
 ) -> dict[str, Any]:
-    """Compute the full skill report for an already-analysed wallet."""
-    edge = _edge_metrics(results)
-    significance = _significance_metrics(results)
-    consistency = _consistency_metrics(results)
-    breadth = _breadth_metrics(results)
-    concentration = _concentration_metrics(results, summary)
-    risk = _risk_metrics(results)
+    """Backward-compatible wrapper around the current analyzer skill report."""
+    from .analyzer import DEFAULT_SKILL_CONFIG, build_category_breakdown, build_skill_report
 
-    components = _build_components(edge, significance, consistency, breadth, concentration, risk)
-    skill_score = _composite_score(components)
+    if not summary:
+        summary = {"trading_pnl": 0.0, "total_pnl": 0.0, "verdict": "unprofitable", "confidence_level": "low"}
+    summary.setdefault("trading_pnl", summary.get("total_pnl", 0.0))
+    summary.setdefault("verdict", "unprofitable" if float(summary.get("trading_pnl") or 0.0) <= 0 else "inconclusive")
+    summary.setdefault("confidence_level", "low" if _detect_truncation(wallet_data, max_records) else summary.get("skill_confidence", "medium"))
+    summary.setdefault("data_truncated", _detect_truncation(wallet_data, max_records))
+    summary.setdefault("outcome_level_edge", _edge_metrics(results))
+    summary.setdefault("total_active_months", 0)
+    summary.setdefault("profitable_months_count", 0)
+    summary.setdefault("monthly_pnl", [])
+    summary.setdefault("total_markets", len(results))
+    summary.setdefault("effective_bets", _breadth_metrics(results)["effective_bets"])
+    summary.setdefault("top1_share_of_gross_profit", None)
+    summary.setdefault("top1_contribution_net_pnl", summary.get("top1_contribution"))
+    summary.setdefault("top3_contribution_net_pnl", summary.get("top3_contribution"))
+    summary.setdefault("hhi_profit_concentration", _hhi([float(row.get("pnl") or 0.0) for row in results if float(row.get("pnl") or 0.0) > 0]))
+    summary.setdefault("gini_profit_concentration", _gini([float(row.get("pnl") or 0.0) for row in results if float(row.get("pnl") or 0.0) > 0]))
+    summary.setdefault("profit_factor", _risk_metrics(results)["profit_factor"])
+    summary.setdefault("max_drawdown", 0.0)
+    summary.setdefault("market_win_rate", 0.0)
+    summary.setdefault("median_market_roi", summary.get("median_roi"))
 
-    data_truncated = _detect_truncation(wallet_data, max_records)
-    confidence = _confidence_level(breadth["effective_bets"], edge["n_resolved"], data_truncated)
-    verdict, verdict_label, verdict_detail = _verdict(skill_score, summary, concentration)
-
-    return {
-        "skill_score": skill_score,
-        "verdict": verdict,
-        "verdict_label": verdict_label,
-        "verdict_detail": verdict_detail,
-        "confidence": confidence,
-        "data_truncated": data_truncated,
-        "components": components,
-        "edge": edge,
-        "significance": significance,
-        "consistency": consistency,
-        "breadth": breadth,
-        "concentration": concentration,
-        "risk": risk,
-    }
+    return build_skill_report(results, summary, build_category_breakdown(results, DEFAULT_SKILL_CONFIG))
 
 
 # --------------------------------------------------------------------------- #
@@ -342,7 +337,7 @@ def _build_components(
         },
     ]
     for component in components:
-        component["weight"] = COMPONENT_WEIGHTS[component["key"]]
+        component["weight"] = COMPONENT_WEIGHTS[str(component["key"])]
     return components
 
 

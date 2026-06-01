@@ -82,7 +82,7 @@ def test_analyze_wallet_uses_closed_position_realized_pnl() -> None:
 def test_classify_market() -> None:
     assert classify_market("Will Ethereum ETF be approved?") == "Crypto"
     assert classify_market("NBA finals winner") == "Sports"
-    assert classify_market("Fed cuts interest rate") == "Economy"
+    assert classify_market("Fed cuts interest rate") == "Economy/Fed"
     assert classify_market("Some niche market") == "Other"
 
 
