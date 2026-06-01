@@ -1,21 +1,34 @@
 from __future__ import annotations
 
 from collections import defaultdict
+from datetime import datetime
 from statistics import median
 from typing import Any
 
 from .polymarket_api import WalletData
+from .skill_score import compute_skill
 
 
 MarketBucket = dict[str, list[dict[str, Any]]]
 
 
-def analyze_wallet(wallet_data: WalletData) -> dict[str, Any]:
+def analyze_wallet(wallet_data: WalletData, max_records: int | None = None) -> dict[str, Any]:
     markets = group_by_market(wallet_data)
     results = [analyze_market(condition_id, bucket) for condition_id, bucket in markets.items()]
     results.sort(key=lambda row: row["pnl"], reverse=True)
     summary = summarize_results(results, wallet_data)
-    return {"summary": summary, "markets": results, "raw_counts": wallet_data.counts}
+    skill = compute_skill(results, wallet_data, summary, max_records=max_records)
+    summary["skill_score"] = skill["skill_score"]
+    summary["skill_verdict"] = skill["verdict"]
+    summary["skill_verdict_label"] = skill["verdict_label"]
+    summary["skill_confidence"] = skill["confidence"]
+    summary["data_truncated"] = skill["data_truncated"]
+    return {
+        "summary": summary,
+        "markets": results,
+        "raw_counts": wallet_data.counts,
+        "skill": skill,
+    }
 
 
 def group_by_market(wallet_data: WalletData) -> dict[str, MarketBucket]:
@@ -48,13 +61,18 @@ def analyze_market(condition_id: str, bucket: MarketBucket) -> dict[str, Any]:
     closed_cost = sum(record_cost(row) for row in closed_positions)
     closed_realized = sum(num(row, "realizedPnl", "realized_pnl") for row in closed_positions)
     inferred_closed_proceeds = max(0.0, closed_cost + closed_realized) if closed_cost else 0.0
-    proceeds = sell_proceeds + redeem_proceeds or inferred_closed_proceeds
+    realized_proceeds = sell_proceeds + redeem_proceeds
+    proceeds = realized_proceeds if realized_proceeds > 0 else inferred_closed_proceeds
 
     current_value = sum(num(row, "currentValue", "current_value") for row in positions)
     realized_pnl = sum(num(row, "realizedPnl", "realized_pnl") for row in positions + closed_positions)
     unrealized_pnl = sum(unrealized_position_pnl(row) for row in positions)
     total_pnl = realized_pnl + unrealized_pnl
     roi = safe_div(total_pnl, cost)
+
+    total_shares, avg_entry_price = entry_price_and_shares(positions, closed_positions, trades)
+    resolved, won = infer_resolution(positions, closed_positions, activity, total_pnl)
+    timestamp = market_timestamp(all_rows)
 
     title = first_text(all_rows, "title", "question") or condition_id
     slug = first_text(all_rows, "slug") or ""
@@ -76,6 +94,11 @@ def analyze_market(condition_id: str, bucket: MarketBucket) -> dict[str, Any]:
         "unrealized_pnl": unrealized_pnl,
         "pnl": total_pnl,
         "roi": roi,
+        "avg_entry_price": avg_entry_price,
+        "total_shares": total_shares,
+        "resolved": resolved,
+        "won": won,
+        "timestamp": timestamp,
         "open_positions": len(positions),
         "closed_positions": len(closed_positions),
         "trade_count": len(trades),
@@ -259,6 +282,131 @@ def record_cost(row: dict[str, Any]) -> float:
 
 def trade_notional(row: dict[str, Any]) -> float:
     return num(row, "size") * num(row, "price")
+
+
+def position_shares(row: dict[str, Any]) -> float:
+    shares = num(row, "totalBought", "total_bought")
+    if shares > 0:
+        return shares
+    return num(row, "size")
+
+
+def entry_price_and_shares(
+    positions: list[dict[str, Any]],
+    closed_positions: list[dict[str, Any]],
+    trades: list[dict[str, Any]],
+) -> tuple[float, float | None]:
+    """Return (total_shares, size-weighted average entry price).
+
+    Prefers avgPrice from position/closed-position records; falls back to BUY
+    trades. Entry price is the cleanest signal of the odds the wallet bet at,
+    which is what separates skill (buying underpriced outcomes) from luck.
+    """
+    weighted_cost = 0.0
+    total_shares = 0.0
+    for row in positions + closed_positions:
+        shares = position_shares(row)
+        price = num(row, "avgPrice", "avg_price")
+        if shares > 0 and price > 0:
+            weighted_cost += shares * price
+            total_shares += shares
+
+    if total_shares > 0:
+        return total_shares, weighted_cost / total_shares
+
+    buy_shares = 0.0
+    buy_cost = 0.0
+    for row in trades:
+        if text(row, "side").upper() != "BUY":
+            continue
+        shares = num(row, "size")
+        price = num(row, "price")
+        if shares > 0 and price > 0:
+            buy_shares += shares
+            buy_cost += shares * price
+
+    if buy_shares > 0:
+        return buy_shares, buy_cost / buy_shares
+    return 0.0, None
+
+
+def infer_resolution(
+    positions: list[dict[str, Any]],
+    closed_positions: list[dict[str, Any]],
+    activity: list[dict[str, Any]],
+    total_pnl: float,
+) -> tuple[bool, int | None]:
+    """Infer whether a market resolved and whether the held outcome won.
+
+    Resolution is only asserted when there is hard evidence the position is
+    settled - a closed position or a REDEEM activity. Open positions are
+    deliberately *not* treated as resolved from their price alone, because a
+    live long-shot trading near 0 is indistinguishable from a settled loss, and
+    guessing would bias the edge calculation. The win/loss is read from the
+    final price when it sits near 0/1, otherwise inferred from the PnL sign.
+    Returns (resolved, won) where ``won`` is 1, 0, or None when undecidable.
+    """
+    has_redeem = any(text(row, "type").upper() == "REDEEM" for row in activity)
+    if not closed_positions and not has_redeem:
+        return False, None
+
+    final_price = weighted_final_price(closed_positions)
+    if final_price is not None:
+        if final_price >= 0.9:
+            return True, 1
+        if final_price <= 0.1:
+            return True, 0
+
+    return True, 1 if total_pnl > 0 else 0
+
+
+def weighted_final_price(rows: list[dict[str, Any]]) -> float | None:
+    """Size-weighted final/current price across rows that actually report one.
+
+    Uses presence checks so a legitimate price of ``0.0`` (a resolved loss) is
+    counted instead of being dropped as if the field were missing.
+    """
+    price_keys = ("curPrice", "cur_price", "currentPrice", "current_price")
+    weighted = 0.0
+    total_weight = 0.0
+    for row in rows:
+        if not any(has_number(row, key) for key in price_keys):
+            continue
+        price = num(row, *price_keys)
+        weight = position_shares(row) or 1.0
+        weighted += weight * price
+        total_weight += weight
+    if total_weight > 0:
+        return weighted / total_weight
+    return None
+
+
+def market_timestamp(rows: list[dict[str, Any]]) -> float | None:
+    """Representative unix timestamp (seconds) for a market, used for time-based
+    consistency analysis. Normalises millisecond timestamps and falls back to
+    parsing an ISO end date."""
+    latest: float | None = None
+    for row in rows:
+        for key in ("timestamp", "matchTime", "match_time", "createdAt", "created_at", "lastUpdate"):
+            value = num(row, key)
+            if value > 0:
+                normalized = value / 1000.0 if value > 1e12 else value
+                latest = normalized if latest is None else max(latest, normalized)
+    if latest is not None:
+        return latest
+
+    iso = first_text(rows, "endDate", "end_date")
+    return parse_iso_timestamp(iso)
+
+
+def parse_iso_timestamp(value: str | None) -> float | None:
+    if not value:
+        return None
+    text_value = value.strip().replace("Z", "+00:00")
+    try:
+        return datetime.fromisoformat(text_value).timestamp()
+    except ValueError:
+        return None
 
 
 def unrealized_position_pnl(row: dict[str, Any]) -> float:

@@ -84,3 +84,62 @@ def test_classify_market() -> None:
     assert classify_market("NBA finals winner") == "Sports"
     assert classify_market("Fed cuts interest rate") == "Economy"
     assert classify_market("Some niche market") == "Other"
+
+
+
+def test_analyze_market_detects_resolved_loss_with_zero_price() -> None:
+    # A losing closed position settles to curPrice 0.0; it must still be
+    # recognised as resolved (won=0) and not silently dropped.
+    wallet_data = WalletData(
+        wallet="0x0000000000000000000000000000000000000001",
+        positions=[],
+        closed_positions=[
+            {
+                "conditionId": "m1",
+                "title": "Will it happen?",
+                "totalBought": 100,
+                "avgPrice": 0.6,
+                "curPrice": 0.0,
+                "realizedPnl": -60,
+            }
+        ],
+        trades=[],
+        activity=[],
+        position_value=0,
+        traded=60,
+    )
+
+    market = analyze_wallet(wallet_data)["markets"][0]
+
+    assert market["resolved"] is True
+    assert market["won"] == 0
+    assert market["avg_entry_price"] == 0.6
+    assert market["total_shares"] == 100
+
+
+def test_open_position_is_not_treated_as_resolved() -> None:
+    # A live long-shot at 0.05 with no closed position / redeem must stay open.
+    wallet_data = WalletData(
+        wallet="0x0000000000000000000000000000000000000001",
+        positions=[
+            {
+                "conditionId": "m1",
+                "title": "Long shot",
+                "totalBought": 100,
+                "avgPrice": 0.05,
+                "curPrice": 0.05,
+                "currentValue": 5,
+                "initialValue": 5,
+            }
+        ],
+        closed_positions=[],
+        trades=[],
+        activity=[],
+        position_value=5,
+        traded=5,
+    )
+
+    market = analyze_wallet(wallet_data)["markets"][0]
+
+    assert market["resolved"] is False
+    assert market["won"] is None

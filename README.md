@@ -8,8 +8,14 @@ App Streamlit để phân tích một ví Polymarket bằng public Data API: tra
 - Gom dữ liệu theo `conditionId`/market.
 - Tính cost basis, proceeds, current value, realized PnL, unrealized PnL, total PnL và ROI.
 - Xếp hạng market theo PnL, xem PnL theo category và phân phối ROI.
-- Tính top 1/top 3 contribution, ROI sau khi bỏ top 1/top 3, win rate, median ROI.
-- Flag `one-hit wonder` và `probably skilled` theo logic trong prompt.
+- **Skill score 0–100 (skilled vs ăn may)** với breakdown từng tiêu chí, dựa trên 5 nhóm bằng chứng:
+  1. **Edge so với giá vào lệnh** – win rate kèo đã resolve so với giá mua trung bình (edge per share). Đây là tín hiệu kỹ năng cốt lõi của prediction market: mua được outcome bị định giá thấp.
+  2. **Ý nghĩa thống kê** – khoảng tin cậy 95% (bootstrap) và t-statistic của ROI theo từng market.
+  3. **Ổn định theo thời gian** – tỉ lệ tháng có lãi (lợi nhuận bền hay dồn vào một đợt).
+  4. **Số quyết định độc lập** – gom market tương quan theo `eventSlug` để ước lượng cỡ mẫu hiệu dụng.
+  5. **Tập trung & rủi ro** – top 1/top 3 contribution, Gini/HHI, Sharpe (ROI) và profit factor.
+- Phân loại: `skilled` / `lucky (one-hit wonder)` / `inconclusive` / `unprofitable`, kèm mức độ tin cậy và **cảnh báo khi dữ liệu bị cắt** (chạm `max_records`).
+- Biểu đồ PnL theo tháng & lũy kế.
 - Export bảng market ra CSV.
 
 ## Cài đặt
@@ -68,8 +74,11 @@ pytest
 - `unrealized_pnl`: ưu tiên `cashPnl` từ open positions; nếu thiếu thì dùng `currentValue - initialValue`.
 - `pnl`: `realized_pnl + unrealized_pnl`.
 - `roi`: `pnl / cost` khi cost lớn hơn 0.
-- `one-hit wonder`: `top1_contribution > 50%` hoặc ROI âm sau khi bỏ top 1/top 3.
-- `probably skilled`: ROI tổng > 5%, ít nhất 30 market, ROI ex-top1 dương, top1 contribution < 40%, win rate > 50%, median ROI > -2%.
+- `resolved` / `won`: một market được coi là đã resolve khi có closed position hoặc activity `REDEEM`; kết quả thắng/thua đọc từ `curPrice` (gần 0/1) hoặc dấu của PnL. Open position (kể cả longshot giá ~0) **không** bị coi là đã resolve để tránh nhầm.
+- `edge_per_share`: `outcome(0/1) − giá vào lệnh`, trung bình trên các kèo đã resolve – đo việc mua dưới giá.
+- `skill_score` (0–100): trung bình có trọng số của 6 thành phần (ý nghĩa thống kê 25, edge 20, ổn định theo thời gian 15, số quyết định độc lập 15, không phụ thuộc 1 kèo 15, hiệu suất điều chỉnh rủi ro 10); trọng số được chuẩn hóa lại khi thiếu dữ liệu cho một thành phần.
+- Verdict: `lucky` khi có lãi nhưng tập trung vào số ít kèo và điểm < 60; `skilled` khi điểm ≥ 65 và không tập trung; `unprofitable` khi tổng PnL ≤ 0; còn lại là `inconclusive`.
+- Hai cờ cũ `one-hit wonder` / `probably skilled` vẫn được giữ để tương thích ngược.
 
 ## Lưu ý
 
