@@ -198,9 +198,30 @@ def test_roi_buy_notional_differs_from_cost_basis_for_round_trips() -> None:
             }
         ],
         trades=[
-            {"conditionId": "roundtrip", "asset": "yes-roundtrip", "side": "BUY", "size": 100, "price": 0.5, "timestamp": 1},
-            {"conditionId": "roundtrip", "asset": "yes-roundtrip", "side": "SELL", "size": 100, "price": 0.6, "timestamp": 2},
-            {"conditionId": "roundtrip", "asset": "yes-roundtrip", "side": "BUY", "size": 100, "price": 0.5, "timestamp": 3},
+            {
+                "conditionId": "roundtrip",
+                "asset": "yes-roundtrip",
+                "side": "BUY",
+                "size": 100,
+                "price": 0.5,
+                "timestamp": 1,
+            },
+            {
+                "conditionId": "roundtrip",
+                "asset": "yes-roundtrip",
+                "side": "SELL",
+                "size": 100,
+                "price": 0.6,
+                "timestamp": 2,
+            },
+            {
+                "conditionId": "roundtrip",
+                "asset": "yes-roundtrip",
+                "side": "BUY",
+                "size": 100,
+                "price": 0.5,
+                "timestamp": 3,
+            },
         ],
     )
 
@@ -225,3 +246,58 @@ def test_skill_report_keeps_legacy_ui_sections() -> None:
     assert "ci_low" in skill["significance"]
     assert "sharpe" in skill["risk"]
     assert "profit_factor" in skill["risk"]
+
+
+def test_skill_report_populates_significance_and_sharpe_metrics() -> None:
+    wallet = _wallet(
+        closed_positions=[
+            _closed_market("sig1", 100, cost=100, month=1),
+            _closed_market("sig2", 80, cost=100, month=2),
+            _closed_market("sig3", 60, cost=100, month=3),
+            _closed_market("sig4", -20, cost=100, month=4),
+        ]
+    )
+
+    skill = analyze_wallet(wallet)["skill"]
+
+    assert skill["significance"]["n"] == 4
+    assert skill["significance"]["std_roi"] is not None
+    assert skill["significance"]["t_stat"] is not None
+    assert skill["significance"]["ci_low"] is not None
+    assert skill["significance"]["ci_high"] is not None
+    assert skill["risk"]["sharpe"] is not None
+
+
+def test_outcome_edge_prefers_buy_trades_over_position_summary_to_avoid_double_counting() -> None:
+    wallet = _wallet(
+        closed_positions=[
+            {
+                "conditionId": "edge-market",
+                "title": "Weather edge market",
+                "outcome": "Yes",
+                "asset": "yes-edge",
+                "totalBought": 100,
+                "avgPrice": 0.70,
+                "curPrice": 1.0,
+                "realizedPnl": 30,
+                "timestamp": _timestamp(1),
+            }
+        ],
+        trades=[
+            {
+                "conditionId": "edge-market",
+                "asset": "yes-edge",
+                "outcome": "Yes",
+                "side": "BUY",
+                "size": 100,
+                "price": 0.50,
+                "timestamp": _timestamp(1),
+            }
+        ],
+    )
+
+    edge = analyze_wallet(wallet)["markets"][0]["outcome_level_edge"][0]
+
+    assert edge["shares"] == 100
+    assert edge["avg_entry_price"] == 0.5
+    assert edge["edge_per_share"] == 0.5

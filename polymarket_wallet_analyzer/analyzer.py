@@ -1,10 +1,11 @@
 from __future__ import annotations
 
+import random
 from collections import defaultdict
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from statistics import mean, median
-from typing import Any
+from statistics import mean, median, stdev
+from typing import Any, Sequence
 
 from .polymarket_api import WalletData
 from .token_resolver import TokenResolver
@@ -14,6 +15,9 @@ MarketBucket = dict[str, list[dict[str, Any]]]
 BUCKET_SOURCES = ("trades", "positions", "closed_positions", "activity")
 REWARD_ACTIVITY_TYPES = {"REWARD", "MAKER_REBATE", "REFERRAL_REWARD"}
 NON_TRADING_ACTIVITY_TYPES = {"MERGE", "SPLIT", "CONVERSION"}
+
+BOOTSTRAP_RESAMPLES = 2000
+BOOTSTRAP_SEED = 1_234_567
 
 DEFAULT_SKILL_CONFIG: dict[str, float] = {
     "one_hit_top1_contribution": 0.50,
@@ -79,7 +83,9 @@ def analyze_wallet(
 
     warnings = build_warnings(markets, grouped.unmapped_records, wallet_data, max_records, config)
     category_breakdown = build_category_breakdown(markets, config)
-    summary = summarize_results(markets, wallet_data, grouped.unmapped_records, warnings, max_records, config, grouped.resolver_stats)
+    summary = summarize_results(
+        markets, wallet_data, grouped.unmapped_records, warnings, max_records, config, grouped.resolver_stats
+    )
     summary["verdict"] = final_verdict(summary, category_breakdown, config)
     warnings = summary["warnings"]
     summary["skill_verdict"] = summary["verdict"]
@@ -94,9 +100,9 @@ def analyze_wallet(
         "summary": summary,
         "category_breakdown": category_breakdown,
         "top_winning_markets": [compact_market(row) for row in markets if row["trading_pnl"] > 0][:10],
-        "top_losing_markets": [compact_market(row) for row in sorted(markets, key=lambda item: item["trading_pnl"]) if row_pnl(row) < 0][
-            :10
-        ],
+        "top_losing_markets": [
+            compact_market(row) for row in sorted(markets, key=lambda item: item["trading_pnl"]) if row_pnl(row) < 0
+        ][:10],
         "markets": markets,
         "market_level_pnl": [compact_market(row) for row in markets],
         "outcome_level_edge": flatten_outcome_edges(markets),
@@ -151,11 +157,13 @@ def group_records_by_market(wallet_data: WalletData, token_resolver: TokenResolv
                 }
                 grouped[str(resolved["conditionId"])][source_name].append(resolved_record)
                 resolver_stats["resolved_from_token_count"] = int(resolver_stats["resolved_from_token_count"]) + 1
-                resolver_stats["resolved_from_token_high_confidence_count"] = int(
-                    resolver_stats["resolved_from_token_high_confidence_count"]
-                ) + 1
+                resolver_stats["resolved_from_token_high_confidence_count"] = (
+                    int(resolver_stats["resolved_from_token_high_confidence_count"]) + 1
+                )
             elif resolved and resolved.get("conditionId"):
-                resolver_stats["low_confidence_resolved_count"] = int(resolver_stats["low_confidence_resolved_count"]) + 1
+                resolver_stats["low_confidence_resolved_count"] = (
+                    int(resolver_stats["low_confidence_resolved_count"]) + 1
+                )
                 low_confidence = unmapped_record(source_name, record)
                 low_confidence["resolved_conditionId"] = resolved.get("conditionId")
                 low_confidence["resolver_confidence"] = resolved.get("resolver_confidence")
@@ -188,7 +196,11 @@ def analyze_market(market_id: str, bucket: MarketBucket) -> dict[str, Any]:
     all_records = positions + closed_positions + trades + activity
 
     ledger = reconstruct_ledger(trades, activity)
-    rewards_pnl = sum(num(record, "usdcSize", "usdc_size", "amount") for record in activity if activity_type(record) in REWARD_ACTIVITY_TYPES)
+    rewards_pnl = sum(
+        num(record, "usdcSize", "usdc_size", "amount")
+        for record in activity
+        if activity_type(record) in REWARD_ACTIVITY_TYPES
+    )
     current_value = sum(num(record, "currentValue", "current_value") for record in positions)
     unrealized_pnl = sum(unrealized_position_pnl(record) for record in positions)
 
@@ -539,7 +551,9 @@ def aggregate_market_metrics(results: list[dict[str, Any]], config: dict[str, fl
         "mean_market_roi_unweighted": mean(roi_values) if roi_values else 0.0,
         "mean_market_roi_cost_weighted": cost_weighted_roi or 0.0,
         "mean_market_roi_buy_notional_unweighted": mean(buy_roi_values) if buy_roi_values else 0.0,
-        "profit_factor": safe_div_zero(gross_profit, abs(gross_loss)) if gross_loss < 0 else (0.0 if gross_profit == 0 else float("inf")),
+        "profit_factor": safe_div_zero(gross_profit, abs(gross_loss))
+        if gross_loss < 0
+        else (0.0 if gross_profit == 0 else float("inf")),
         "gross_profit": gross_profit,
         "gross_loss": gross_loss,
         "hhi_profit_concentration": hhi(positive_profits) or 0.0,
@@ -702,10 +716,15 @@ def build_warnings(
     if max_records and any(count >= max_records for count in wallet_data.counts.values()):
         warnings.append("Dữ liệu có thể bị truncate vì ít nhất một endpoint chạm max_records.")
     if unmapped_records:
-        warnings.append(f"Có {len(unmapped_records)} record chỉ có asset/token hoặc thiếu market key; đã loại khỏi kết luận skill.")
+        warnings.append(
+            f"Có {len(unmapped_records)} record chỉ có asset/token hoặc thiếu market key; đã loại khỏi kết luận skill."
+        )
     if any(row.get("max_capital_at_risk_estimated") for row in results):
         warnings.append("max_capital_at_risk là best-effort cho market thiếu lịch sử trades đầy đủ.")
-    if sum(1 for row in results if row.get("category") == "Other") / max(1, len(results)) > config["max_other_category_ratio_medium"]:
+    if (
+        sum(1 for row in results if row.get("category") == "Other") / max(1, len(results))
+        > config["max_other_category_ratio_medium"]
+    ):
         warnings.append("Nhiều market bị phân loại Other; kết luận theo category có thể yếu.")
     return warnings
 
@@ -761,22 +780,87 @@ def build_skill_report(
             "hhi": summary["hhi_profit_concentration"],
             "gini": summary["gini_profit_concentration"],
         },
-        "significance": {
-            "n": summary["total_markets"],
-            "mean_roi": summary["mean_market_roi_unweighted"],
+        "significance": significance_metrics(markets, summary),
+        "risk": risk_metrics(markets, summary),
+    }
+
+
+def significance_metrics(markets: list[dict[str, Any]], summary: dict[str, Any]) -> dict[str, Any]:
+    roi_values = [float(row["roi_cost_basis"]) for row in markets if row.get("roi_cost_basis") is not None]
+    n = len(roi_values)
+    if n < 2:
+        return {
+            "n": n,
+            "mean_roi": roi_values[0] if roi_values else None,
             "std_roi": None,
             "t_stat": None,
             "ci_low": None,
             "ci_high": None,
             "significant": False,
-        },
-        "risk": {
-            "sharpe": None,
-            "profit_factor": summary["profit_factor"],
-            "gross_profit": summary["gross_profit"],
-            "gross_loss": summary["gross_loss"],
-            "max_drawdown": summary["max_drawdown"],
-        },
+        }
+
+    mean_roi = mean(roi_values)
+    std_roi = stdev(roi_values)
+    standard_error = std_roi / (n**0.5) if std_roi > 0 else 0.0
+    t_stat = mean_roi / standard_error if standard_error > 0 else None
+    ci_low, ci_high = bootstrap_mean_ci(roi_values)
+
+    return {
+        "n": n,
+        "mean_roi": mean_roi,
+        "std_roi": std_roi,
+        "t_stat": t_stat,
+        "ci_low": ci_low,
+        "ci_high": ci_high,
+        "significant": ci_low is not None and ci_low > 0,
+    }
+
+
+def bootstrap_mean_ci(
+    values: Sequence[float], resamples: int = BOOTSTRAP_RESAMPLES
+) -> tuple[float | None, float | None]:
+    if len(values) < 2:
+        return None, None
+
+    rng = random.Random(BOOTSTRAP_SEED)
+    sample_means: list[float] = []
+    for _ in range(resamples):
+        sample_sum = 0.0
+        for _ in values:
+            sample_sum += values[rng.randrange(len(values))]
+        sample_means.append(sample_sum / len(values))
+    sample_means.sort()
+    return percentile(sample_means, 2.5), percentile(sample_means, 97.5)
+
+
+def percentile(values: Sequence[float], percent: float) -> float | None:
+    if not values:
+        return None
+    if len(values) == 1:
+        return values[0]
+
+    clamped_percent = clamp(percent, 0.0, 100.0)
+    position = (len(values) - 1) * (clamped_percent / 100.0)
+    lower_index = int(position)
+    upper_index = min(lower_index + 1, len(values) - 1)
+    fraction = position - lower_index
+    return values[lower_index] * (1.0 - fraction) + values[upper_index] * fraction
+
+
+def risk_metrics(markets: list[dict[str, Any]], summary: dict[str, Any]) -> dict[str, Any]:
+    roi_values = [float(row["roi_cost_basis"]) for row in markets if row.get("roi_cost_basis") is not None]
+    sharpe = None
+    if len(roi_values) >= 2:
+        spread = stdev(roi_values)
+        if spread > 0:
+            sharpe = mean(roi_values) / spread
+
+    return {
+        "sharpe": sharpe,
+        "profit_factor": summary["profit_factor"],
+        "gross_profit": summary["gross_profit"],
+        "gross_loss": summary["gross_loss"],
+        "max_drawdown": summary["max_drawdown"],
     }
 
 
@@ -871,15 +955,22 @@ def outcome_level_edges(
 ) -> list[dict[str, Any]]:
     grouped: dict[str, dict[str, Any]] = {}
 
+    buy_trade_outcome_keys = {
+        outcome_key
+        for trade in trades
+        if text(trade, "side").upper() == "BUY" and (outcome_key := get_outcome_key(trade))
+    }
+
     for record in positions + closed_positions:
         outcome_key = get_outcome_key(record)
         if not outcome_key:
             continue
         group = grouped.setdefault(outcome_key, new_outcome_edge_group(market_id, record, outcome_key))
-        shares = num(record, "totalBought", "total_bought") or num(record, "size")
-        cost = record_cost(record)
-        group["shares"] += shares
-        group["cost"] += cost
+        if outcome_key not in buy_trade_outcome_keys:
+            shares = num(record, "totalBought", "total_bought") or num(record, "size")
+            cost = record_cost(record)
+            group["shares"] += shares
+            group["cost"] += cost
         group["records"].append(record)
         if record in closed_positions:
             group["resolved"] = True
@@ -923,7 +1014,14 @@ def outcome_level_edges(
 
 
 def new_outcome_edge_group(market_id: str, record: dict[str, Any], outcome_key: str) -> dict[str, Any]:
-    return {"market_id": market_id, "outcome_key": outcome_key, "shares": 0.0, "cost": 0.0, "records": [], "resolved": False}
+    return {
+        "market_id": market_id,
+        "outcome_key": outcome_key,
+        "shares": 0.0,
+        "cost": 0.0,
+        "records": [],
+        "resolved": False,
+    }
 
 
 def infer_outcome_result(records: list[dict[str, Any]], resolved: bool) -> float | None:
@@ -938,9 +1036,17 @@ def infer_outcome_result(records: list[dict[str, Any]], resolved: bool) -> float
 
 
 def aggregate_outcome_edges(results: list[dict[str, Any]]) -> dict[str, Any]:
-    edges = [edge for row in results for edge in row.get("outcome_level_edge", []) if edge.get("edge_per_share") is not None]
+    edges = [
+        edge for row in results for edge in row.get("outcome_level_edge", []) if edge.get("edge_per_share") is not None
+    ]
     if not edges:
-        return {"n_resolved": 0, "edge_per_share": None, "edge_per_share_weighted": None, "win_rate": None, "avg_entry_price": None}
+        return {
+            "n_resolved": 0,
+            "edge_per_share": None,
+            "edge_per_share_weighted": None,
+            "win_rate": None,
+            "avg_entry_price": None,
+        }
     total_shares = sum(float(edge.get("shares") or 0.0) for edge in edges)
     return {
         "n_resolved": len(edges),
@@ -949,7 +1055,9 @@ def aggregate_outcome_edges(results: list[dict[str, Any]]) -> dict[str, Any]:
             sum(float(edge["edge_per_share"]) * float(edge.get("shares") or 0.0) for edge in edges), total_shares
         ),
         "win_rate": mean(float(edge["outcome_result"]) for edge in edges if edge.get("outcome_result") is not None),
-        "avg_entry_price": safe_div(sum(float(edge["avg_entry_price"]) * float(edge.get("shares") or 0.0) for edge in edges), total_shares),
+        "avg_entry_price": safe_div(
+            sum(float(edge["avg_entry_price"]) * float(edge.get("shares") or 0.0) for edge in edges), total_shares
+        ),
     }
 
 
@@ -1120,7 +1228,17 @@ def classify_market(*values: str) -> str:
             "s&p",
             "nasdaq",
         ),
-        "Tech/AI": ("openai", "anthropic", "ai", "artificial intelligence", "nvidia", "apple", "google", "tesla", "spacex"),
+        "Tech/AI": (
+            "openai",
+            "anthropic",
+            "ai",
+            "artificial intelligence",
+            "nvidia",
+            "apple",
+            "google",
+            "tesla",
+            "spacex",
+        ),
         "Geopolitics": ("war", "ceasefire", "ukraine", "russia", "israel", "china", "taiwan", "iran", "nato"),
         "Entertainment": ("oscar", "grammy", "movie", "album", "song", "box office", "netflix", "celebrity", "gta"),
     }
@@ -1171,7 +1289,10 @@ def entry_price_and_shares(
 
 
 def infer_resolution(
-    positions: list[dict[str, Any]], closed_positions: list[dict[str, Any]], activity: list[dict[str, Any]], trading_pnl: float
+    positions: list[dict[str, Any]],
+    closed_positions: list[dict[str, Any]],
+    activity: list[dict[str, Any]],
+    trading_pnl: float,
 ) -> tuple[bool, int | None]:
     resolved = bool(closed_positions) or any(activity_type(record) == "REDEEM" for record in activity)
     if not resolved:
@@ -1219,7 +1340,11 @@ def max_drawdown(monthly_pnl: list[dict[str, Any]]) -> float:
 
 
 def effective_bets(results: list[dict[str, Any]]) -> int:
-    keys = {str(row.get("event_slug") or row.get("market_id")) for row in results if row.get("event_slug") or row.get("market_id")}
+    keys = {
+        str(row.get("event_slug") or row.get("market_id"))
+        for row in results
+        if row.get("event_slug") or row.get("market_id")
+    }
     return len(keys)
 
 
@@ -1240,7 +1365,9 @@ def gini(values: list[float]) -> float | None:
     return (2 * weighted_sum) / (value_count * total) - (value_count + 1) / value_count
 
 
-def market_warnings(ledger: LedgerMetrics, positions: list[dict[str, Any]], closed_positions: list[dict[str, Any]]) -> list[str]:
+def market_warnings(
+    ledger: LedgerMetrics, positions: list[dict[str, Any]], closed_positions: list[dict[str, Any]]
+) -> list[str]:
     warnings: list[str] = []
     position_realized = sum(num(record, "realizedPnl", "realized_pnl") for record in positions)
     closed_realized = sum(num(record, "realizedPnl", "realized_pnl") for record in closed_positions)
@@ -1348,7 +1475,11 @@ def unrealized_ratio(summary: dict[str, Any]) -> float:
 
 
 def edge_score(edge: dict[str, Any]) -> float | None:
-    value = edge.get("edge_per_share_weighted") if edge.get("edge_per_share_weighted") is not None else edge.get("edge_per_share")
+    value = (
+        edge.get("edge_per_share_weighted")
+        if edge.get("edge_per_share_weighted") is not None
+        else edge.get("edge_per_share")
+    )
     if value is None:
         return None
     return clamp((float(value) + 0.02) / 0.12, 0.0, 1.0)
