@@ -9,6 +9,7 @@ from pathlib import Path
 
 from .analyzer import analyze_wallet
 from .polymarket_api import PolymarketAPIError, PolymarketClient
+from .token_resolver import DEFAULT_TOKEN_CACHE_PATH, TokenResolver
 
 
 def main() -> int:
@@ -17,6 +18,10 @@ def main() -> int:
     parser.add_argument("--max-records", type=int, default=5000, help="Max records per Data API endpoint")
     parser.add_argument("--csv", type=Path, help="Optional path to export market rows as CSV")
     parser.add_argument("--json", type=Path, help="Optional path to export the full report as JSON")
+    token_group = parser.add_mutually_exclusive_group()
+    token_group.add_argument("--resolve-tokens", dest="resolve_tokens", action="store_true", default=True, help="Resolve token-only records via CLOB metadata")
+    token_group.add_argument("--no-resolve-tokens", dest="resolve_tokens", action="store_false", help="Disable token metadata resolver")
+    parser.add_argument("--token-cache-path", type=Path, default=DEFAULT_TOKEN_CACHE_PATH, help="Token resolver cache path")
     args = parser.parse_args()
 
     client = PolymarketClient()
@@ -29,7 +34,8 @@ def main() -> int:
         print(f"Lỗi gọi Polymarket API: {exc}", file=sys.stderr)
         return 1
 
-    report = analyze_wallet(wallet_data, max_records=args.max_records)
+    token_resolver = TokenResolver(cache_path=args.token_cache_path, enabled=args.resolve_tokens) if args.resolve_tokens else None
+    report = analyze_wallet(wallet_data, max_records=args.max_records, token_resolver=token_resolver)
     summary = report["summary"]
     skill = report["skill"]
 
@@ -52,11 +58,23 @@ def main() -> int:
     print(f"Top1 contribution net PnL: {_fmt_pct(summary.get('top1_contribution_net_pnl'))}")
     print(f"Top1 share of gross profit: {_fmt_pct(summary.get('top1_share_of_gross_profit'))}")
     print(f"Unmapped records: {summary.get('unmapped_records_count', 0)}")
+    print(
+        "Token resolver: "
+        f"{'on' if summary.get('token_resolver_enabled') else 'off'}, "
+        f"resolved {summary.get('resolved_from_token_high_confidence_count', 0)}, "
+        f"cache hits {summary.get('token_resolver_cache_hits', 0)}, "
+        f"API calls {summary.get('token_resolver_api_calls', 0)}, "
+        f"failures {summary.get('token_resolver_failures', 0)}"
+    )
     print(f"Top market: {summary.get('top_market_title', '')} (${summary.get('top_market_pnl', 0.0):,.2f})")
 
     print()
     score = skill.get("skill_score")
+    raw_score = skill.get("raw_skill_score")
+    score_adjustment = skill.get("score_adjustment") or {}
     print(f"Skill score: {score if score is not None else 'N/A'}/100  [{skill.get('verdict_label', 'N/A')}]")
+    if score_adjustment.get("applied") and raw_score is not None:
+        print(f"Raw score: {raw_score}/100  (capped at {score_adjustment.get('cap')}/100 due to verdict/concentration risk)")
     print(f"Confidence: {skill.get('confidence', 'medium')}" + ("  (DỮ LIỆU BỊ CẮT)" if skill.get("data_truncated") else ""))
     print(f"-> {skill.get('verdict_detail', '')}")
     print("Breakdown:")

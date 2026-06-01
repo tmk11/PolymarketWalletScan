@@ -99,6 +99,30 @@ def test_one_hit_wonder_flagged_as_lucky() -> None:
     assert skill["verdict"] == "insufficient_data"
     assert skill["skill_score"] < 60
 
+def test_one_hit_verdict_caps_displayed_skill_score() -> None:
+    closed = [_closed_position("big", entry_price=0.01, won=True, shares=10_000.0, month=1, event="e-big")]
+    for index in range(34):
+        closed.append(
+            _closed_position(
+                market_id=f"m{index}",
+                entry_price=0.40,
+                won=index % 5 < 3,
+                shares=100.0,
+                month=(index % 12) + 1,
+                event=f"event-{index}",
+            )
+        )
+
+    report = analyze_wallet(_build_wallet(closed_positions=closed), max_records=5000)
+    skill = report["skill"]
+
+    assert skill["verdict"] == "lucky_or_one_hit_wonder"
+    assert skill["raw_skill_score"] > skill["skill_score"]
+    assert skill["skill_score"] == 65
+    assert skill["adjusted_skill_score"] == skill["skill_score"]
+    assert skill["score_adjustment"]["applied"] is True
+    assert skill["score_adjustment"]["reason"] == "one_hit_wonder_cap"
+
 
 def test_unprofitable_wallet_is_not_skilled() -> None:
     closed = [

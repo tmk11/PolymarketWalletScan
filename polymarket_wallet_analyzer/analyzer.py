@@ -7,6 +7,7 @@ from statistics import mean, median
 from typing import Any
 
 from .polymarket_api import WalletData
+from .token_resolver import TokenResolver
 
 MarketBucket = dict[str, list[dict[str, Any]]]
 
@@ -27,6 +28,8 @@ DEFAULT_SKILL_CONFIG: dict[str, float] = {
     "max_other_category_ratio_medium": 0.50,
     "max_unrealized_pnl_ratio_medium": 0.50,
     "low_confidence_top1_contribution": 0.70,
+    "one_hit_skill_score_cap": 65,
+    "low_sample_one_hit_skill_score_cap": 55,
 }
 
 CATEGORY_ORDER = [
@@ -46,6 +49,8 @@ CATEGORY_ORDER = [
 class GroupedRecords:
     markets: dict[str, MarketBucket]
     unmapped_records: list[dict[str, Any]]
+    low_confidence_resolved_records: list[dict[str, Any]]
+    resolver_stats: dict[str, int | bool]
 
 
 @dataclass
@@ -65,15 +70,16 @@ def analyze_wallet(
     wallet_data: WalletData,
     max_records: int | None = None,
     skill_config: dict[str, float] | None = None,
+    token_resolver: TokenResolver | None = None,
 ) -> dict[str, Any]:
     config = {**DEFAULT_SKILL_CONFIG, **(skill_config or {})}
-    grouped = group_records_by_market(wallet_data)
+    grouped = group_records_by_market(wallet_data, token_resolver=token_resolver)
     markets = [analyze_market(market_id, bucket) for market_id, bucket in grouped.markets.items()]
     markets.sort(key=lambda row: float(row["trading_pnl"]), reverse=True)
 
     warnings = build_warnings(markets, grouped.unmapped_records, wallet_data, max_records, config)
     category_breakdown = build_category_breakdown(markets, config)
-    summary = summarize_results(markets, wallet_data, grouped.unmapped_records, warnings, max_records, config)
+    summary = summarize_results(markets, wallet_data, grouped.unmapped_records, warnings, max_records, config, grouped.resolver_stats)
     summary["verdict"] = final_verdict(summary, category_breakdown, config)
     warnings = summary["warnings"]
     summary["skill_verdict"] = summary["verdict"]
@@ -81,7 +87,7 @@ def analyze_wallet(
     summary["category_skill_summary"] = category_skill_sentence(category_breakdown)
     summary["is_probably_skilled"] = summary["verdict"] == "skilled"
 
-    skill = build_skill_report(markets, summary, category_breakdown)
+    skill = build_skill_report(markets, summary, category_breakdown, config)
 
     return {
         "wallet": wallet_data.wallet,
@@ -96,6 +102,7 @@ def analyze_wallet(
         "outcome_level_edge": flatten_outcome_edges(markets),
         "unmapped_records_count": len(grouped.unmapped_records),
         "unmapped_records": grouped.unmapped_records[:100],
+        "low_confidence_resolved_records": grouped.low_confidence_resolved_records[:100],
         "warnings": warnings,
         "raw_counts": wallet_data.counts,
         "skill": skill,
@@ -106,20 +113,67 @@ def group_by_market(wallet_data: WalletData) -> dict[str, MarketBucket]:
     return group_records_by_market(wallet_data).markets
 
 
-def group_records_by_market(wallet_data: WalletData) -> GroupedRecords:
+def group_records_by_market(wallet_data: WalletData, token_resolver: TokenResolver | None = None) -> GroupedRecords:
     token_condition_map = build_token_condition_map(wallet_data)
     grouped: dict[str, MarketBucket] = defaultdict(new_market_bucket)
     unmapped: list[dict[str, Any]] = []
+    low_confidence_resolved: list[dict[str, Any]] = []
+    resolver_enabled = bool(token_resolver and token_resolver.enabled)
+    resolver_stats: dict[str, int | bool] = {
+        "resolved_from_token_count": 0,
+        "resolved_from_token_high_confidence_count": 0,
+        "low_confidence_resolved_count": 0,
+        "token_resolver_enabled": resolver_enabled,
+        "token_resolver_cache_hits": 0,
+        "token_resolver_api_calls": 0,
+        "token_resolver_failures": 0,
+    }
 
     for source_name in BUCKET_SOURCES:
         for record in getattr(wallet_data, source_name):
-            market_key = get_market_key(record, token_condition_map)
+            market_key, market_key_source = get_market_key_with_source(record, token_condition_map)
             if market_key:
-                grouped[market_key][source_name].append(record)
+                grouped[market_key][source_name].append({**record, "market_key_source": market_key_source})
+                continue
+
+            resolved = token_resolver.resolve_record(record) if resolver_enabled and token_resolver else None
+            if resolved and resolved.get("conditionId") and resolved.get("resolver_confidence") == "high":
+                resolved_record = {
+                    **record,
+                    "conditionId": str(resolved["conditionId"]),
+                    "resolved_marketId": resolved.get("marketId"),
+                    "resolved_slug": resolved.get("slug"),
+                    "resolved_question": resolved.get("question"),
+                    "resolved_outcome": resolved.get("outcome"),
+                    "market_key_source": "resolved_from_token",
+                    "resolver_confidence": resolved["resolver_confidence"],
+                    "resolver_source": resolved.get("source"),
+                }
+                grouped[str(resolved["conditionId"])][source_name].append(resolved_record)
+                resolver_stats["resolved_from_token_count"] = int(resolver_stats["resolved_from_token_count"]) + 1
+                resolver_stats["resolved_from_token_high_confidence_count"] = int(
+                    resolver_stats["resolved_from_token_high_confidence_count"]
+                ) + 1
+            elif resolved and resolved.get("conditionId"):
+                resolver_stats["low_confidence_resolved_count"] = int(resolver_stats["low_confidence_resolved_count"]) + 1
+                low_confidence = unmapped_record(source_name, record)
+                low_confidence["resolved_conditionId"] = resolved.get("conditionId")
+                low_confidence["resolver_confidence"] = resolved.get("resolver_confidence")
+                low_confidence["resolver_source"] = resolved.get("source")
+                low_confidence_resolved.append(low_confidence)
+                unmapped.append(low_confidence)
             else:
                 unmapped.append(unmapped_record(source_name, record))
 
-    return GroupedRecords(markets=dict(grouped), unmapped_records=unmapped)
+    if token_resolver:
+        resolver_stats.update(token_resolver.stats())
+
+    return GroupedRecords(
+        markets=dict(grouped),
+        unmapped_records=unmapped,
+        low_confidence_resolved_records=low_confidence_resolved,
+        resolver_stats=resolver_stats,
+    )
 
 
 def new_market_bucket() -> MarketBucket:
@@ -167,6 +221,9 @@ def analyze_market(market_id: str, bucket: MarketBucket) -> dict[str, Any]:
 
     return {
         "market_id": market_id,
+        "market_key_source": first_text(all_records, "market_key_source") or "unknown",
+        "resolver_confidence": first_text(all_records, "resolver_confidence") or "",
+        "resolver_source": first_text(all_records, "resolver_source") or "",
         "title": title,
         "slug": slug,
         "event_slug": event_slug,
@@ -339,6 +396,7 @@ def summarize_results(
     warnings: list[str] | None = None,
     max_records: int | None = None,
     skill_config: dict[str, float] | None = None,
+    resolver_stats: dict[str, int | bool] | None = None,
 ) -> dict[str, Any]:
     config = {**DEFAULT_SKILL_CONFIG, **(skill_config or {})}
     summary = aggregate_market_metrics(results, config)
@@ -357,6 +415,7 @@ def summarize_results(
             "warnings": warnings or [],
         }
     )
+    summary.update(default_resolver_stats() | (resolver_stats or {}))
     if low_sample_one_hit_pattern(summary, config):
         summary["warnings"].append(
             "low_sample_one_hit_pattern_detected: top market concentration/ROI ex-top1 looks one-hit-like, "
@@ -365,6 +424,18 @@ def summarize_results(
     summary["confidence_level"] = confidence_level(summary, config)
     summary["skill_confidence"] = summary["confidence_level"]
     return add_legacy_summary_aliases(summary)
+
+
+def default_resolver_stats() -> dict[str, int | bool]:
+    return {
+        "resolved_from_token_count": 0,
+        "resolved_from_token_high_confidence_count": 0,
+        "low_confidence_resolved_count": 0,
+        "token_resolver_enabled": False,
+        "token_resolver_cache_hits": 0,
+        "token_resolver_api_calls": 0,
+        "token_resolver_failures": 0,
+    }
 
 
 def aggregate_market_metrics(results: list[dict[str, Any]], config: dict[str, float]) -> dict[str, Any]:
@@ -640,24 +711,31 @@ def build_warnings(
 
 
 def build_skill_report(
-    markets: list[dict[str, Any]], summary: dict[str, Any], category_breakdown: list[dict[str, Any]]
+    markets: list[dict[str, Any]],
+    summary: dict[str, Any],
+    category_breakdown: list[dict[str, Any]],
+    config: dict[str, float],
 ) -> dict[str, Any]:
     components = skill_components(summary)
     usable_components = [component for component in components if component["normalized"] is not None]
     total_weight = sum(float(component["weight"]) for component in usable_components)
-    skill_score = None
+    raw_skill_score = None
     if usable_components and summary["trading_pnl"] > 0:
         for component in usable_components:
             component["contribution"] = round(
                 100.0 * float(component["normalized"]) * float(component["weight"]) / total_weight,
                 1,
             )
-        skill_score = int(round(sum(float(component["contribution"]) for component in usable_components)))
+        raw_skill_score = int(round(sum(float(component["contribution"]) for component in usable_components)))
     for component in components:
         component.setdefault("contribution", None)
+    skill_score, score_adjustment = adjusted_skill_score(raw_skill_score, summary, config)
 
     return {
         "skill_score": skill_score,
+        "raw_skill_score": raw_skill_score,
+        "adjusted_skill_score": skill_score,
+        "score_adjustment": score_adjustment,
         "verdict": summary["verdict"],
         "legacy_verdict": legacy_verdict(summary["verdict"]),
         "verdict_label": verdict_label(summary["verdict"]),
@@ -700,6 +778,39 @@ def build_skill_report(
             "max_drawdown": summary["max_drawdown"],
         },
     }
+
+
+def adjusted_skill_score(
+    raw_score: int | None,
+    summary: dict[str, Any],
+    config: dict[str, float],
+) -> tuple[int | None, dict[str, Any]]:
+    if raw_score is None:
+        return None, {"applied": False, "reason": None, "cap": None, "raw_score": None}
+
+    adjustment: dict[str, Any] = {
+        "applied": False,
+        "reason": None,
+        "cap": None,
+        "raw_score": raw_score,
+    }
+
+    cap: int | None = None
+    reason: str | None = None
+    if summary["verdict"] == "lucky_or_one_hit_wonder":
+        cap = int(config["one_hit_skill_score_cap"])
+        reason = "one_hit_wonder_cap"
+    elif summary["verdict"] == "insufficient_data" and any(
+        "low_sample_one_hit_pattern_detected" in warning for warning in summary.get("warnings", [])
+    ):
+        cap = int(config["low_sample_one_hit_skill_score_cap"])
+        reason = "low_sample_one_hit_pattern_cap"
+
+    if cap is None or raw_score <= cap:
+        return raw_score, adjustment
+
+    adjustment.update({"applied": True, "reason": reason, "cap": cap})
+    return cap, adjustment
 
 
 def skill_components(summary: dict[str, Any]) -> list[dict[str, Any]]:
@@ -859,17 +970,29 @@ def build_token_condition_map(wallet_data: WalletData) -> dict[str, str]:
 
 
 def get_market_key(record: dict[str, Any], token_condition_map: dict[str, str] | None = None) -> str | None:
-    explicit_key = explicit_market_key(record)
+    market_key, _source = get_market_key_with_source(record, token_condition_map)
+    return market_key
+
+
+def get_market_key_with_source(
+    record: dict[str, Any], token_condition_map: dict[str, str] | None = None
+) -> tuple[str | None, str | None]:
+    explicit_key, explicit_source = explicit_market_key_with_source(record)
     if explicit_key:
-        return explicit_key
+        return explicit_key, explicit_source
     if token_condition_map:
         for token in token_candidates(record):
             if token in token_condition_map:
-                return token_condition_map[token]
-    return None
+                return token_condition_map[token], "mapped_from_local_token_metadata"
+    return None, None
 
 
 def explicit_market_key(record: dict[str, Any]) -> str | None:
+    market_key, _source = explicit_market_key_with_source(record)
+    return market_key
+
+
+def explicit_market_key_with_source(record: dict[str, Any]) -> tuple[str | None, str | None]:
     for path in (
         ("conditionId",),
         ("condition_id",),
@@ -890,13 +1013,22 @@ def explicit_market_key(record: dict[str, Any]) -> str | None:
     ):
         value = nested_value(record, path)
         if value:
-            return str(value)
-    return None
+            return str(value), market_key_source_for_path(path)
+    return None, None
+
+
+def market_key_source_for_path(path: tuple[str, ...]) -> str:
+    field_name = path[-1]
+    if field_name in {"conditionId", "condition_id", "conditionID"}:
+        return "native_conditionId"
+    if field_name in {"marketId", "market_id"}:
+        return "native_marketId"
+    return "native_slug"
 
 
 def token_candidates(record: dict[str, Any]) -> list[str]:
     values = []
-    for key in ("asset", "token_id", "tokenId", "clobTokenId", "oppositeAsset"):
+    for key in ("asset", "token_id", "tokenId", "clobTokenId", "clob_token_id", "oppositeAsset"):
         value = record.get(key)
         if value:
             values.append(str(value))

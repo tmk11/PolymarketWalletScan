@@ -101,7 +101,7 @@ def compute_skill(
     summary.setdefault("market_win_rate", 0.0)
     summary.setdefault("median_market_roi", summary.get("median_roi"))
 
-    return build_skill_report(results, summary, build_category_breakdown(results, DEFAULT_SKILL_CONFIG))
+    return build_skill_report(results, summary, build_category_breakdown(results, DEFAULT_SKILL_CONFIG), DEFAULT_SKILL_CONFIG)
 
 
 # --------------------------------------------------------------------------- #

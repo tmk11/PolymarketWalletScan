@@ -7,6 +7,7 @@ import streamlit as st
 
 from polymarket_wallet_analyzer.analyzer import analyze_wallet
 from polymarket_wallet_analyzer.polymarket_api import PolymarketAPIError, PolymarketClient, validate_wallet
+from polymarket_wallet_analyzer.token_resolver import TokenResolver
 
 st.set_page_config(page_title="Polymarket Wallet Analyzer", page_icon="📈", layout="wide")
 
@@ -27,7 +28,7 @@ def pct(value: float | None) -> str:
 def fetch_and_analyze(wallet: str, max_records: int) -> dict:
     client = PolymarketClient()
     wallet_data = client.fetch_wallet_data(wallet, max_records=max_records)
-    return analyze_wallet(wallet_data, max_records=max_records)
+    return analyze_wallet(wallet_data, max_records=max_records, token_resolver=TokenResolver())
 
 
 st.title("📈 Polymarket Wallet Analyzer")
@@ -114,11 +115,20 @@ verdict_styles = {
 confidence_labels = {"high": "Độ tin cậy cao", "medium": "Độ tin cậy trung bình", "low": "Độ tin cậy thấp"}
 
 score = skill.get("skill_score")
+raw_score = skill.get("raw_skill_score")
+score_adjustment = skill.get("score_adjustment") or {}
 verdict_box = verdict_styles.get(skill.get("verdict", "inconclusive"), st.info)
 
 score_col, gauge_col = st.columns([1, 2])
-score_col.metric("Skill score", f"{score}/100" if score is not None else "N/A")
+score_label = "Skill score"
+if score_adjustment.get("applied"):
+    score_label = "Adjusted skill score"
+score_col.metric(score_label, f"{score}/100" if score is not None else "N/A")
 score_col.caption(confidence_labels.get(skill.get("confidence", "medium"), skill.get("confidence", "medium")))
+if score_adjustment.get("applied") and raw_score is not None:
+    score_col.caption(
+        f"Raw score {raw_score}/100 bị cap ở {score_adjustment.get('cap')}/100 vì verdict/concentration risk."
+    )
 
 if score is not None:
     gauge = go.Figure(

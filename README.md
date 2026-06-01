@@ -61,6 +61,14 @@ curl http://127.0.0.1:9765/_stcore/health
 python -m polymarket_wallet_analyzer.cli 0x296bd652f74deac6a8bd9bcb04265f3a65fd2cf2 --max-records 5000 --csv exports/report.csv --json exports/report.json
 ```
 
+Token resolver được bật mặc định trong CLI để giảm record chỉ có token/asset:
+
+```bash
+python -m polymarket_wallet_analyzer.cli 0x... --resolve-tokens
+python -m polymarket_wallet_analyzer.cli 0x... --no-resolve-tokens
+python -m polymarket_wallet_analyzer.cli 0x... --token-cache-path .cache/polymarket_token_resolver_cache.json
+```
+
 ## Chạy kiểm tra
 
 ```bash
@@ -93,6 +101,16 @@ mypy .
 - Analyzer ưu tiên market-level identifiers: `conditionId`, `condition_id`, `conditionID`, `marketId`, `market_id`, `marketSlug`, `slug`.
 - `asset`/`token_id` là outcome-level token như YES/NO, nên không được dùng làm market key nếu chưa map được về `conditionId`.
 - Record không map được sẽ vào `unmapped_records`, tăng `unmapped_records_count`, có warning, và không dùng để kết luận skill chính thức.
+
+### Token metadata resolver
+
+- Một số record từ Data API chỉ có `asset`, `token_id`, `tokenId`, `clobTokenId` hoặc `clob_token_id`. Các field này là outcome-level token, không phải market-level key.
+- Resolver trích token theo thứ tự an toàn: `clobTokenId`, `clob_token_id`, `tokenId`, `token_id`, `asset`.
+- Resolver thử map token về `conditionId` bằng CLOB metadata: trước tiên `GET https://clob.polymarket.com/markets/{token_id}`, sau đó fallback `GET https://clob.polymarket.com/book?token_id={token_id}` khi cần lấy condition từ order book.
+- Chỉ record có `resolver_confidence = "high"` mới được đưa vào PnL/ROI/skill. Nếu resolve fail hoặc confidence không high, record vẫn nằm trong `unmapped_records` và bị loại khỏi kết luận chính thức.
+- Cache mặc định nằm ở `.cache/polymarket_token_resolver_cache.json`, giúp tránh gọi API lặp lại cho cùng token.
+- Summary có thêm `resolved_from_token_count`, `resolved_from_token_high_confidence_count`, `low_confidence_resolved_count`, `token_resolver_enabled`, `token_resolver_cache_hits`, `token_resolver_api_calls`, `token_resolver_failures`.
+- Resolved token records là best-effort: nếu API lỗi, timeout, JSON invalid hoặc thiếu `conditionId`, analyzer không crash và không gom bừa market.
 
 ### Top contribution
 

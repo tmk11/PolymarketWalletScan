@@ -211,6 +211,13 @@ def test_summary_output_has_new_contract_fields() -> None:
         "max_drawdown",
         "confidence_level",
         "verdict",
+        "resolved_from_token_count",
+        "resolved_from_token_high_confidence_count",
+        "low_confidence_resolved_count",
+        "token_resolver_enabled",
+        "token_resolver_cache_hits",
+        "token_resolver_api_calls",
+        "token_resolver_failures",
         "unmapped_records_count",
         "warnings",
     ):
