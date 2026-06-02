@@ -57,6 +57,38 @@ def main() -> int:
     )
     print(f"Top1 contribution net PnL: {_fmt_pct(summary.get('top1_contribution_net_pnl'))}")
     print(f"Top1 share of gross profit: {_fmt_pct(summary.get('top1_share_of_gross_profit'))}")
+    print(
+        "Recent 3d trades est. PnL/ROI: "
+        f"${summary.get('recent_3d_estimated_pnl', 0.0):,.2f} / "
+        f"{_fmt_pct(summary.get('recent_3d_roi'))} "
+        f"({summary.get('recent_3d_marked_count', 0)} marked trades)"
+    )
+    print(
+        "Recent 3d BUY trades est. PnL/ROI: "
+        f"${summary.get('recent_3d_buy_estimated_pnl', 0.0):,.2f} / "
+        f"{_fmt_pct(summary.get('recent_3d_buy_roi'))} "
+        f"({summary.get('recent_3d_buy_marked_count', 0)} marked BUY trades)"
+    )
+    print(
+        "Recent 3d markets PnL/ROI: "
+        f"${summary.get('recent_3d_market_pnl', 0.0):,.2f} / "
+        f"{_fmt_pct(summary.get('recent_3d_market_roi_buy_notional'))}"
+    )
+    print(
+        "Recent 3d trades/frequency: "
+        f"{summary.get('recent_3d_trade_count', 0)} trades, "
+        f"{summary.get('recent_3d_avg_trades_per_day', 0.0):,.1f}/day, "
+        f"${summary.get('recent_3d_trade_notional', 0.0):,.2f} notional, "
+        f"{summary.get('recent_3d_frequency_label', 'none')}"
+    )
+    print(
+        "Recent 7d trades/frequency: "
+        f"{summary.get('recent_7d_trade_count', 0)} trades, "
+        f"{summary.get('recent_7d_avg_trades_per_day', 0.0):,.1f}/day, "
+        f"${summary.get('recent_7d_trade_notional', 0.0):,.2f} notional, "
+        f"{summary.get('recent_7d_frequency_label', 'none')}"
+    )
+    print(f"Recent copy risk: {summary.get('recent_copy_risk_level', 'unknown')} - {summary.get('recent_copy_risk_reason', '')}")
     print(f"Unmapped records: {summary.get('unmapped_records_count', 0)}")
     print(
         "Token resolver: "

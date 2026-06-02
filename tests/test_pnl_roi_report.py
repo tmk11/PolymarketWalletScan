@@ -301,3 +301,239 @@ def test_outcome_edge_prefers_buy_trades_over_position_summary_to_avoid_double_c
     assert edge["shares"] == 100
     assert edge["avg_entry_price"] == 0.5
     assert edge["edge_per_share"] == 0.5
+
+
+def test_recent_7d_trade_frequency_counts_latest_window() -> None:
+    base_timestamp = datetime(2026, 6, 1, tzinfo=timezone.utc).timestamp()
+    trades = []
+    for index in range(42):
+        trades.append(
+            {
+                "conditionId": f"recent-{index}",
+                "asset": f"asset-{index}",
+                "side": "BUY" if index % 2 == 0 else "SELL",
+                "size": 10,
+                "price": 0.5,
+                "timestamp": base_timestamp - (index % 7) * 86_400,
+            }
+        )
+    for index in range(3):
+        trades.append(
+            {
+                "conditionId": f"old-{index}",
+                "asset": f"old-asset-{index}",
+                "side": "BUY",
+                "size": 100,
+                "price": 0.5,
+                "timestamp": base_timestamp - 9 * 86_400,
+            }
+        )
+
+    summary = analyze_wallet(_wallet(trades=trades))["summary"]
+
+    assert summary["recent_7d_trade_count"] == 42
+    assert summary["recent_7d_buy_count"] == 21
+    assert summary["recent_7d_sell_count"] == 21
+    assert summary["recent_7d_trade_notional"] == 210
+    assert summary["recent_7d_avg_trades_per_day"] == 6
+    assert summary["recent_7d_active_days"] == 7
+    assert summary["recent_7d_trades_per_active_day"] == 6
+    assert summary["recent_7d_frequency_label"] == "medium"
+
+
+def test_recent_7d_trade_frequency_uses_activity_trades_and_dedupes() -> None:
+    base_timestamp = datetime(2026, 6, 1, tzinfo=timezone.utc).timestamp()
+    duplicate_trade = {
+        "conditionId": "dup",
+        "asset": "asset-dup",
+        "side": "BUY",
+        "size": 10,
+        "price": 0.5,
+        "timestamp": base_timestamp,
+        "transactionHash": "0xdup",
+    }
+    activity = [{**duplicate_trade, "type": "TRADE", "usdcSize": 5}]
+    for index in range(30):
+        activity.append(
+            {
+                "type": "TRADE",
+                "conditionId": f"activity-{index}",
+                "asset": f"asset-activity-{index}",
+                "side": "BUY",
+                "size": 10,
+                "price": 0.5,
+                "timestamp": base_timestamp - (index % 3) * 86_400,
+                "transactionHash": f"0xactivity{index}",
+            }
+        )
+
+    summary = analyze_wallet(_wallet(trades=[duplicate_trade], activity=activity))["summary"]
+
+    assert summary["recent_7d_trade_count"] == 31
+    assert summary["recent_7d_buy_count"] == 31
+    assert summary["recent_7d_trade_notional"] == 155
+
+
+def test_recent_buy_trade_losses_raise_copy_risk() -> None:
+    base_timestamp = datetime(2026, 6, 1, tzinfo=timezone.utc).timestamp()
+    trades = []
+    positions = []
+    for index in range(50):
+        asset = f"asset-buy-loss-{index}"
+        trades.append(
+            {
+                "conditionId": f"buy-loss-{index}",
+                "asset": asset,
+                "outcome": "Yes",
+                "side": "BUY",
+                "size": 10,
+                "price": 0.5,
+                "timestamp": base_timestamp - index,
+            }
+        )
+        positions.append(
+            {
+                "conditionId": f"buy-loss-{index}",
+                "asset": asset,
+                "outcome": "Yes",
+                "totalBought": 10,
+                "avgPrice": 0.5,
+                "curPrice": 0.0,
+                "cashPnl": -5,
+                "timestamp": base_timestamp - index,
+            }
+        )
+
+    summary = analyze_wallet(_wallet(positions=positions, trades=trades))["summary"]
+
+    assert summary["recent_buy_trade_50_marked_count"] == 50
+    assert summary["recent_buy_trade_50_estimated_pnl"] == -250
+    assert summary["recent_copy_risk_level"] == "high"
+    assert "3 ngày" in summary["recent_copy_risk_reason"]
+
+
+def test_recent_3d_data_suppresses_50_trade_fallback_risk() -> None:
+    base_timestamp = datetime(2026, 6, 1, tzinfo=timezone.utc).timestamp()
+    trades = []
+    positions = []
+    for index in range(12):
+        asset = f"asset-3d-win-{index}"
+        trades.append(
+            {
+                "conditionId": f"3d-win-{index}",
+                "asset": asset,
+                "outcome": "Yes",
+                "side": "BUY",
+                "size": 10,
+                "price": 0.5,
+                "timestamp": base_timestamp - (index % 3) * 86_400,
+            }
+        )
+        positions.append(
+            {
+                "conditionId": f"3d-win-{index}",
+                "asset": asset,
+                "outcome": "Yes",
+                "totalBought": 10,
+                "avgPrice": 0.5,
+                "curPrice": 1.0,
+                "cashPnl": 5,
+                "timestamp": base_timestamp - (index % 3) * 86_400,
+            }
+        )
+    for index in range(50):
+        asset = f"asset-old-loss-{index}"
+        trades.append(
+            {
+                "conditionId": f"old-loss-{index}",
+                "asset": asset,
+                "outcome": "Yes",
+                "side": "BUY",
+                "size": 10,
+                "price": 0.5,
+                "timestamp": base_timestamp - 5 * 86_400 - index,
+            }
+        )
+        positions.append(
+            {
+                "conditionId": f"old-loss-{index}",
+                "asset": asset,
+                "outcome": "Yes",
+                "totalBought": 10,
+                "avgPrice": 0.5,
+                "curPrice": 0.0,
+                "cashPnl": -5,
+                "timestamp": base_timestamp - 5 * 86_400 - index,
+            }
+        )
+
+    summary = analyze_wallet(_wallet(positions=positions, trades=trades))["summary"]
+
+    assert summary["recent_3d_buy_estimated_pnl"] == 60
+    assert summary["recent_buy_trade_50_estimated_pnl"] < 0
+    assert summary["recent_copy_risk_level"] == "low"
+    assert "3 ngày" in summary["recent_copy_risk_reason"]
+
+
+def test_recent_3d_window_is_primary_copy_risk() -> None:
+    base_timestamp = datetime(2026, 6, 1, tzinfo=timezone.utc).timestamp()
+    trades = []
+    positions = []
+    for index in range(12):
+        asset = f"asset-3d-loss-{index}"
+        trades.append(
+            {
+                "conditionId": f"3d-loss-{index}",
+                "asset": asset,
+                "outcome": "Yes",
+                "side": "BUY",
+                "size": 10,
+                "price": 0.5,
+                "timestamp": base_timestamp - (index % 3) * 86_400,
+            }
+        )
+        positions.append(
+            {
+                "conditionId": f"3d-loss-{index}",
+                "asset": asset,
+                "outcome": "Yes",
+                "totalBought": 10,
+                "avgPrice": 0.5,
+                "curPrice": 0.0,
+                "cashPnl": -5,
+                "timestamp": base_timestamp - (index % 3) * 86_400,
+            }
+        )
+    for index in range(60):
+        asset = f"asset-old-win-{index}"
+        trades.append(
+            {
+                "conditionId": f"old-win-{index}",
+                "asset": asset,
+                "outcome": "Yes",
+                "side": "BUY",
+                "size": 10,
+                "price": 0.5,
+                "timestamp": base_timestamp - 5 * 86_400 - index,
+            }
+        )
+        positions.append(
+            {
+                "conditionId": f"old-win-{index}",
+                "asset": asset,
+                "outcome": "Yes",
+                "totalBought": 10,
+                "avgPrice": 0.5,
+                "curPrice": 1.0,
+                "cashPnl": 5,
+                "timestamp": base_timestamp - 5 * 86_400 - index,
+            }
+        )
+
+    summary = analyze_wallet(_wallet(positions=positions, trades=trades))["summary"]
+
+    assert summary["recent_3d_buy_trade_count"] == 12
+    assert summary["recent_3d_buy_estimated_pnl"] == -60
+    assert summary["recent_3d_buy_roi"] == -1.0
+    assert summary["recent_copy_risk_level"] == "high"
+    assert "3 ngày" in summary["recent_copy_risk_reason"]

@@ -15,6 +15,8 @@ MarketBucket = dict[str, list[dict[str, Any]]]
 BUCKET_SOURCES = ("trades", "positions", "closed_positions", "activity")
 REWARD_ACTIVITY_TYPES = {"REWARD", "MAKER_REBATE", "REFERRAL_REWARD"}
 NON_TRADING_ACTIVITY_TYPES = {"MERGE", "SPLIT", "CONVERSION"}
+RECENT_WINDOWS = (10, 25, 50)
+SECONDS_PER_DAY = 86_400
 
 BOOTSTRAP_RESAMPLES = 2000
 BOOTSTRAP_SEED = 1_234_567
@@ -34,6 +36,9 @@ DEFAULT_SKILL_CONFIG: dict[str, float] = {
     "low_confidence_top1_contribution": 0.70,
     "one_hit_skill_score_cap": 65,
     "low_sample_one_hit_skill_score_cap": 55,
+    "recent_trade_warning_window": 50,
+    "recent_trade_warning_min_marked": 20,
+    "recent_trade_warning_roi": 0.0,
 }
 
 CATEGORY_ORDER = [
@@ -414,7 +419,8 @@ def summarize_results(
     summary = aggregate_market_metrics(results, config)
     raw_record_count = sum(wallet_data.counts.values())
     unmapped_count = len(unmapped_records)
-    data_truncated = bool(max_records and any(count >= max_records for count in wallet_data.counts.values()))
+    fetch_warnings = list(getattr(wallet_data, "fetch_warnings", ()))
+    data_truncated = bool(max_records and any(count >= max_records for count in wallet_data.counts.values())) or bool(fetch_warnings)
 
     summary.update(
         {
@@ -428,6 +434,8 @@ def summarize_results(
         }
     )
     summary.update(default_resolver_stats() | (resolver_stats or {}))
+    summary.update(recent_performance_metrics(results, wallet_data))
+    add_recent_performance_warnings(summary, config)
     if low_sample_one_hit_pattern(summary, config):
         summary["warnings"].append(
             "low_sample_one_hit_pattern_detected: top market concentration/ROI ex-top1 looks one-hit-like, "
@@ -448,6 +456,456 @@ def default_resolver_stats() -> dict[str, int | bool]:
         "token_resolver_api_calls": 0,
         "token_resolver_failures": 0,
     }
+
+
+def recent_performance_metrics(results: list[dict[str, Any]], wallet_data: WalletData) -> dict[str, Any]:
+    market_windows = recent_market_windows(results)
+    trade_windows = recent_trade_windows(wallet_data)
+    buy_trade_windows = recent_trade_windows(wallet_data, side_filter="BUY")
+    trade_3d = recent_trade_time_window(wallet_data, days=3)
+    buy_trade_3d = recent_trade_time_window(wallet_data, days=3, side_filter="BUY")
+    market_3d = recent_market_time_window(results, days=3)
+    trade_frequency = recent_trade_frequency(wallet_data, days=7)
+    copy_risk_level, copy_risk_reason = recent_copy_risk(
+        market_windows,
+        trade_windows,
+        buy_trade_windows,
+        trade_3d,
+        buy_trade_3d,
+        market_3d,
+    )
+    trade_50 = window_by_size(trade_windows, 50)
+    buy_trade_50 = window_by_size(buy_trade_windows, 50)
+    market_50 = window_by_size(market_windows, 50)
+    return {
+        "recent_market_windows": market_windows,
+        "recent_trade_windows": trade_windows,
+        "recent_buy_trade_windows": buy_trade_windows,
+        "recent_trade_3d": trade_3d,
+        "recent_buy_trade_3d": buy_trade_3d,
+        "recent_market_3d": market_3d,
+        "recent_3d_trade_count": trade_3d["trade_count"],
+        "recent_3d_buy_count": trade_3d["buy_count"],
+        "recent_3d_sell_count": trade_3d["sell_count"],
+        "recent_3d_trade_notional": trade_3d["trade_notional"],
+        "recent_3d_estimated_pnl": trade_3d["estimated_pnl"],
+        "recent_3d_roi": trade_3d["roi_mark_to_market"],
+        "recent_3d_marked_count": trade_3d["marked_count"],
+        "recent_3d_avg_trades_per_day": trade_3d["avg_trades_per_day"],
+        "recent_3d_frequency_label": trade_3d["frequency_label"],
+        "recent_3d_buy_trade_count": buy_trade_3d["trade_count"],
+        "recent_3d_buy_estimated_pnl": buy_trade_3d["estimated_pnl"],
+        "recent_3d_buy_roi": buy_trade_3d["roi_mark_to_market"],
+        "recent_3d_buy_marked_count": buy_trade_3d["marked_count"],
+        "recent_3d_market_count": market_3d["market_count"],
+        "recent_3d_market_pnl": market_3d["trading_pnl"],
+        "recent_3d_market_roi_buy_notional": market_3d["roi_buy_notional"],
+        "recent_trade_frequency": trade_frequency,
+        "recent_7d_trade_count": trade_frequency["trade_count"],
+        "recent_7d_buy_count": trade_frequency["buy_count"],
+        "recent_7d_sell_count": trade_frequency["sell_count"],
+        "recent_7d_trade_notional": trade_frequency["trade_notional"],
+        "recent_7d_avg_trades_per_day": trade_frequency["avg_trades_per_day"],
+        "recent_7d_trades_per_active_day": trade_frequency["trades_per_active_day"],
+        "recent_7d_active_days": trade_frequency["active_days"],
+        "recent_7d_frequency_label": trade_frequency["frequency_label"],
+        "recent_trade_50_estimated_pnl": trade_50.get("estimated_pnl", 0.0),
+        "recent_trade_50_roi": trade_50.get("roi_mark_to_market", 0.0),
+        "recent_trade_50_marked_count": trade_50.get("marked_count", 0),
+        "recent_trade_50_losing_rate": trade_50.get("losing_rate", 0.0),
+        "recent_buy_trade_50_estimated_pnl": buy_trade_50.get("estimated_pnl", 0.0),
+        "recent_buy_trade_50_roi": buy_trade_50.get("roi_mark_to_market", 0.0),
+        "recent_buy_trade_50_marked_count": buy_trade_50.get("marked_count", 0),
+        "recent_buy_trade_50_losing_rate": buy_trade_50.get("losing_rate", 0.0),
+        "recent_market_50_pnl": market_50.get("trading_pnl", 0.0),
+        "recent_market_50_roi_buy_notional": market_50.get("roi_buy_notional", 0.0),
+        "recent_copy_risk_level": copy_risk_level,
+        "recent_copy_risk_reason": copy_risk_reason,
+    }
+
+
+def recent_trade_frequency(wallet_data: WalletData, days: int = 7) -> dict[str, Any]:
+    trades = [trade for trade in wallet_trade_records(wallet_data) if maybe_num(trade, "timestamp") is not None]
+    if not trades:
+        return {
+            "window_days": days,
+            "reference_timestamp": None,
+            "window_start_timestamp": None,
+            "trade_count": 0,
+            "buy_count": 0,
+            "sell_count": 0,
+            "trade_notional": 0.0,
+            "avg_trades_per_day": 0.0,
+            "active_days": 0,
+            "trades_per_active_day": 0.0,
+            "frequency_label": "none",
+        }
+
+    reference_timestamp = max(num(trade, "timestamp") for trade in trades)
+    window_start = reference_timestamp - days * SECONDS_PER_DAY
+    recent_trades = [trade for trade in trades if num(trade, "timestamp") >= window_start]
+    buy_count = sum(1 for trade in recent_trades if text(trade, "side").upper() == "BUY")
+    sell_count = sum(1 for trade in recent_trades if text(trade, "side").upper() == "SELL")
+    active_days = len({datetime.fromtimestamp(num(trade, "timestamp"), tz=timezone.utc).strftime("%Y-%m-%d") for trade in recent_trades})
+    avg_trades_per_day = safe_div_zero(float(len(recent_trades)), float(days))
+    return {
+        "window_days": days,
+        "reference_timestamp": reference_timestamp,
+        "window_start_timestamp": window_start,
+        "trade_count": len(recent_trades),
+        "buy_count": buy_count,
+        "sell_count": sell_count,
+        "trade_notional": sum(trade_notional(trade) for trade in recent_trades),
+        "avg_trades_per_day": avg_trades_per_day,
+        "active_days": active_days,
+        "trades_per_active_day": safe_div_zero(float(len(recent_trades)), float(active_days)),
+        "frequency_label": trade_frequency_label(avg_trades_per_day),
+    }
+
+
+def recent_trade_time_window(wallet_data: WalletData, days: int, side_filter: str | None = None) -> dict[str, Any]:
+    trades = [trade for trade in wallet_trade_records(wallet_data) if maybe_num(trade, "timestamp") is not None]
+    if side_filter:
+        trades = [trade for trade in trades if text(trade, "side").upper() == side_filter]
+    if not trades:
+        return empty_recent_trade_time_window(days)
+
+    reference_timestamp = max(num(trade, "timestamp") for trade in trades)
+    window_start = reference_timestamp - days * SECONDS_PER_DAY
+    recent_trades = [trade for trade in trades if num(trade, "timestamp") >= window_start]
+    estimates = [estimate_trade_mark_to_market(trade, wallet_data) for trade in recent_trades]
+    marked_rows = [row for row in estimates if row["estimated_pnl"] is not None]
+    estimated_pnl = sum(float(row["estimated_pnl"] or 0.0) for row in marked_rows)
+    marked_notional = sum(float(row["notional"] or 0.0) for row in marked_rows)
+    active_days = len({datetime.fromtimestamp(num(trade, "timestamp"), tz=timezone.utc).strftime("%Y-%m-%d") for trade in recent_trades})
+    avg_trades_per_day = safe_div_zero(float(len(recent_trades)), float(days))
+    buy_count = sum(1 for trade in recent_trades if text(trade, "side").upper() == "BUY")
+    sell_count = sum(1 for trade in recent_trades if text(trade, "side").upper() == "SELL")
+    return {
+        "window_days": days,
+        "reference_timestamp": reference_timestamp,
+        "window_start_timestamp": window_start,
+        "trade_count": len(recent_trades),
+        "buy_count": buy_count,
+        "sell_count": sell_count,
+        "trade_notional": sum(trade_notional(trade) for trade in recent_trades),
+        "estimated_pnl": estimated_pnl,
+        "marked_count": len(marked_rows),
+        "unknown_count": len(estimates) - len(marked_rows),
+        "marked_notional": marked_notional,
+        "roi_mark_to_market": safe_div_zero(estimated_pnl, marked_notional),
+        "losing_trades": sum(1 for row in marked_rows if float(row["estimated_pnl"] or 0.0) < 0),
+        "losing_rate": safe_div(sum(1 for row in marked_rows if float(row["estimated_pnl"] or 0.0) < 0), len(marked_rows)) or 0.0,
+        "active_days": active_days,
+        "avg_trades_per_day": avg_trades_per_day,
+        "trades_per_active_day": safe_div_zero(float(len(recent_trades)), float(active_days)),
+        "frequency_label": trade_frequency_label(avg_trades_per_day),
+        "side_filter": side_filter or "ALL",
+        "is_estimated": True,
+    }
+
+
+def empty_recent_trade_time_window(days: int) -> dict[str, Any]:
+    return {
+        "window_days": days,
+        "reference_timestamp": None,
+        "window_start_timestamp": None,
+        "trade_count": 0,
+        "buy_count": 0,
+        "sell_count": 0,
+        "trade_notional": 0.0,
+        "estimated_pnl": 0.0,
+        "marked_count": 0,
+        "unknown_count": 0,
+        "marked_notional": 0.0,
+        "roi_mark_to_market": 0.0,
+        "losing_trades": 0,
+        "losing_rate": 0.0,
+        "active_days": 0,
+        "avg_trades_per_day": 0.0,
+        "trades_per_active_day": 0.0,
+        "frequency_label": "none",
+        "side_filter": "ALL",
+        "is_estimated": True,
+    }
+
+
+def trade_frequency_label(avg_trades_per_day: float) -> str:
+    if avg_trades_per_day <= 0:
+        return "none"
+    if avg_trades_per_day >= 20:
+        return "high"
+    if avg_trades_per_day >= 5:
+        return "medium"
+    return "low"
+
+
+def recent_market_windows(results: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    dated_rows = [row for row in results if row.get("timestamp") is not None]
+    dated_rows.sort(key=lambda row: float(row.get("timestamp") or 0.0), reverse=True)
+    windows = []
+    for window_size in RECENT_WINDOWS:
+        rows = dated_rows[:window_size]
+        pnl = sum(row_pnl(row) for row in rows)
+        buy_notional = sum(float(row.get("total_buy_notional") or 0.0) for row in rows)
+        windows.append(
+            {
+                "window": window_size,
+                "available_count": len(rows),
+                "trading_pnl": pnl,
+                "buy_notional": buy_notional,
+                "roi_buy_notional": safe_div_zero(pnl, buy_notional),
+                "win_rate": safe_div(sum(1 for row in rows if row_pnl(row) > 0), len(rows)) or 0.0,
+                "is_estimated": False,
+            }
+        )
+    return windows
+
+
+def recent_market_time_window(results: list[dict[str, Any]], days: int) -> dict[str, Any]:
+    dated_rows = [row for row in results if row.get("timestamp") is not None]
+    if not dated_rows:
+        return {
+            "window_days": days,
+            "reference_timestamp": None,
+            "window_start_timestamp": None,
+            "market_count": 0,
+            "trading_pnl": 0.0,
+            "buy_notional": 0.0,
+            "roi_buy_notional": 0.0,
+            "win_rate": 0.0,
+            "is_estimated": False,
+        }
+    reference_timestamp = max(float(row.get("timestamp") or 0.0) for row in dated_rows)
+    window_start = reference_timestamp - days * SECONDS_PER_DAY
+    rows = [row for row in dated_rows if float(row.get("timestamp") or 0.0) >= window_start]
+    pnl = sum(row_pnl(row) for row in rows)
+    buy_notional = sum(float(row.get("total_buy_notional") or 0.0) for row in rows)
+    return {
+        "window_days": days,
+        "reference_timestamp": reference_timestamp,
+        "window_start_timestamp": window_start,
+        "market_count": len(rows),
+        "trading_pnl": pnl,
+        "buy_notional": buy_notional,
+        "roi_buy_notional": safe_div_zero(pnl, buy_notional),
+        "win_rate": safe_div(sum(1 for row in rows if row_pnl(row) > 0), len(rows)) or 0.0,
+        "is_estimated": False,
+    }
+
+
+def recent_trade_windows(wallet_data: WalletData, side_filter: str | None = None) -> list[dict[str, Any]]:
+    trades = [trade for trade in wallet_trade_records(wallet_data) if maybe_num(trade, "timestamp") is not None]
+    if side_filter:
+        trades = [trade for trade in trades if text(trade, "side").upper() == side_filter]
+    trades.sort(key=lambda trade: num(trade, "timestamp"), reverse=True)
+    estimates = [estimate_trade_mark_to_market(trade, wallet_data) for trade in trades]
+    windows = []
+    for window_size in RECENT_WINDOWS:
+        rows = estimates[:window_size]
+        marked_rows = [row for row in rows if row["estimated_pnl"] is not None]
+        estimated_pnl = sum(float(row["estimated_pnl"] or 0.0) for row in marked_rows)
+        marked_notional = sum(float(row["notional"] or 0.0) for row in marked_rows)
+        windows.append(
+            {
+                "window": window_size,
+                "trade_count": len(rows),
+                "marked_count": len(marked_rows),
+                "unknown_count": len(rows) - len(marked_rows),
+                "estimated_pnl": estimated_pnl,
+                "marked_notional": marked_notional,
+                "roi_mark_to_market": safe_div_zero(estimated_pnl, marked_notional),
+                "losing_trades": sum(1 for row in marked_rows if float(row["estimated_pnl"] or 0.0) < 0),
+                "losing_rate": safe_div(
+                    sum(1 for row in marked_rows if float(row["estimated_pnl"] or 0.0) < 0), len(marked_rows)
+                )
+                or 0.0,
+                "is_estimated": True,
+            }
+        )
+    return windows
+
+
+def wallet_trade_records(wallet_data: WalletData) -> list[dict[str, Any]]:
+    records: list[dict[str, Any]] = []
+    seen: set[tuple[str, str, str, str, str, str, str]] = set()
+    for source_name, source_records in (("trades", wallet_data.trades), ("activity", wallet_data.activity)):
+        for record in source_records:
+            if source_name == "activity" and activity_type(record) != "TRADE":
+                continue
+            key = trade_dedupe_key(record)
+            if key in seen:
+                continue
+            seen.add(key)
+            records.append({**record, "recent_trade_source": source_name})
+    return records
+
+
+def trade_dedupe_key(record: dict[str, Any]) -> tuple[str, str, str, str, str, str, str]:
+    return (
+        text(record, "transactionHash", "transaction_hash", "hash"),
+        explicit_market_key(record) or "",
+        first_text([record], "asset", "token_id", "tokenId", "clobTokenId") or "",
+        text(record, "side").upper(),
+        str(maybe_num(record, "size") or ""),
+        str(maybe_num(record, "price") or ""),
+        str(maybe_num(record, "timestamp") or ""),
+    )
+
+
+def estimate_trade_mark_to_market(trade: dict[str, Any], wallet_data: WalletData) -> dict[str, Any]:
+    mark_price = outcome_mark_price(trade, wallet_data)
+    price = num(trade, "price")
+    size = num(trade, "size")
+    side = text(trade, "side").upper()
+    notional = trade_notional(trade)
+    estimated_pnl = None
+    if mark_price is not None and size > 0 and price >= 0:
+        if side == "SELL":
+            estimated_pnl = (price - mark_price) * size
+        else:
+            estimated_pnl = (mark_price - price) * size
+    return {
+        "timestamp": maybe_num(trade, "timestamp"),
+        "market_id": explicit_market_key(trade) or "",
+        "asset": first_text([trade], "asset", "token_id", "tokenId", "clobTokenId") or "",
+        "title": first_text([trade], "title", "question") or "",
+        "side": side,
+        "price": price,
+        "size": size,
+        "notional": notional,
+        "mark_price": mark_price,
+        "estimated_pnl": estimated_pnl,
+    }
+
+
+def outcome_mark_price(trade: dict[str, Any], wallet_data: WalletData) -> float | None:
+    outcome_key = get_outcome_key(trade)
+    token = first_text([trade], "asset", "token_id", "tokenId", "clobTokenId")
+    fallback_key = outcome_fallback_key(trade)
+    for record in wallet_data.positions + wallet_data.closed_positions:
+        record_mark = mark_price_from_record(record)
+        if record_mark is None:
+            continue
+        if outcome_key and get_outcome_key(record) == outcome_key:
+            return record_mark
+        if token and token in token_candidates(record):
+            return record_mark
+        if fallback_key and outcome_fallback_key(record) == fallback_key:
+            return record_mark
+    return None
+
+
+def outcome_fallback_key(record: dict[str, Any]) -> str | None:
+    market_key = explicit_market_key(record)
+    outcome_index = first_text([record], "outcomeIndex", "outcome_index")
+    outcome = first_text([record], "outcome")
+    if market_key and outcome_index:
+        return f"{market_key}:outcome_index:{outcome_index}"
+    if market_key and outcome:
+        return f"{market_key}:outcome:{outcome.lower()}"
+    return None
+
+
+def mark_price_from_record(record: dict[str, Any]) -> float | None:
+    mark_price = maybe_num(record, "curPrice", "cur_price")
+    if mark_price is not None:
+        return mark_price
+    if maybe_num(record, "realizedPnl", "realized_pnl") is not None:
+        return 1.0 if num(record, "realizedPnl", "realized_pnl") > 0 else 0.0
+    return None
+
+
+def recent_copy_risk(
+    market_windows: list[dict[str, Any]],
+    trade_windows: list[dict[str, Any]],
+    buy_trade_windows: list[dict[str, Any]],
+    trade_3d: dict[str, Any],
+    buy_trade_3d: dict[str, Any],
+    market_3d: dict[str, Any],
+) -> tuple[str, str]:
+    has_enough_3d = any(
+        (
+            int(buy_trade_3d.get("marked_count") or 0) >= 10,
+            int(trade_3d.get("marked_count") or 0) >= 10,
+            int(market_3d.get("market_count") or 0) >= 10,
+        )
+    )
+    if int(buy_trade_3d.get("marked_count") or 0) >= 10 and float(buy_trade_3d.get("estimated_pnl") or 0.0) < 0:
+        return "high", "3 ngày gần nhất của BUY trades đang lỗ theo mark-to-market estimate."
+    if int(market_3d.get("market_count") or 0) >= 10 and float(market_3d.get("trading_pnl") or 0.0) < 0:
+        return "high", "3 ngày gần nhất của market-level PnL đang âm."
+    if int(trade_3d.get("marked_count") or 0) >= 10 and float(trade_3d.get("estimated_pnl") or 0.0) < 0:
+        return "medium", "Tổng all trades trong 3 ngày gần nhất đang âm, nhưng BUY-only/market-level chưa âm."
+    if has_enough_3d:
+        return "low", "3 ngày gần nhất không cho thấy drawdown rõ ở BUY-only hoặc market-level."
+
+    buy_trade_50 = window_by_size(buy_trade_windows, 50)
+    buy_trade_25 = window_by_size(buy_trade_windows, 25)
+    trade_50 = window_by_size(trade_windows, 50)
+    market_50 = window_by_size(market_windows, 50)
+    trade_25 = window_by_size(trade_windows, 25)
+    marked_buy_50 = int(buy_trade_50.get("marked_count") or 0)
+    if marked_buy_50 >= 20 and float(buy_trade_50.get("estimated_pnl") or 0.0) < 0:
+        return "high", "50 BUY trade gần nhất đang lỗ theo mark-to-market estimate."
+    if int(buy_trade_25.get("marked_count") or 0) >= 10 and float(buy_trade_25.get("estimated_pnl") or 0.0) < 0:
+        return "medium", "25 BUY trade gần nhất đang lỗ theo mark-to-market estimate."
+    marked_50 = int(trade_50.get("marked_count") or 0)
+    if marked_50 >= 20 and float(trade_50.get("estimated_pnl") or 0.0) < 0:
+        return "high", "50 trade gần nhất đang lỗ theo mark-to-market estimate."
+    if int(market_50.get("available_count") or 0) >= 20 and float(market_50.get("trading_pnl") or 0.0) < 0:
+        return "high", "50 market gần nhất đang có trading PnL âm."
+    if int(trade_25.get("marked_count") or 0) >= 10 and float(trade_25.get("estimated_pnl") or 0.0) < 0:
+        return "medium", "25 trade gần nhất đang lỗ theo mark-to-market estimate."
+    if marked_buy_50 < 20 and marked_50 < 20 and int(market_50.get("available_count") or 0) < 20:
+        return "unknown", "Không đủ dữ liệu gần đây để đánh giá copy risk."
+    return "low", "Không thấy recent drawdown rõ trong các cửa sổ gần đây."
+
+
+def window_by_size(windows: list[dict[str, Any]], window_size: int) -> dict[str, Any]:
+    return next((row for row in windows if row.get("window") == window_size), {})
+
+
+def add_recent_performance_warnings(summary: dict[str, Any], config: dict[str, float]) -> None:
+    buy_trade_3d = summary.get("recent_buy_trade_3d", {})
+    trade_3d = summary.get("recent_trade_3d", {})
+    market_3d = summary.get("recent_market_3d", {})
+    has_enough_3d = any(
+        (
+            int(buy_trade_3d.get("marked_count") or 0) >= 10,
+            int(trade_3d.get("marked_count") or 0) >= 10,
+            int(market_3d.get("market_count") or 0) >= 10,
+        )
+    )
+    if int(buy_trade_3d.get("marked_count") or 0) >= 10 and float(buy_trade_3d.get("estimated_pnl") or 0.0) < 0:
+        summary["warnings"].append(
+            "recent_3d_buy_loss_detected: BUY trades in the last 3 days have negative estimated mark-to-market PnL."
+        )
+    if int(market_3d.get("market_count") or 0) >= 10 and float(market_3d.get("trading_pnl") or 0.0) < 0:
+        summary["warnings"].append("recent_3d_market_loss_detected: market-level PnL in the last 3 days is negative.")
+    if has_enough_3d:
+        return
+
+    window_size = int(config["recent_trade_warning_window"])
+    trade_window = window_by_size(summary.get("recent_trade_windows", []), window_size)
+    min_marked = int(config["recent_trade_warning_min_marked"])
+    if int(trade_window.get("marked_count") or 0) >= min_marked and float(trade_window.get("estimated_pnl") or 0.0) < 0:
+        summary["warnings"].append(
+            f"recent_trade_window_loss_detected: last {window_size} trades have estimated mark-to-market PnL "
+            f"{float(trade_window.get('estimated_pnl') or 0.0):,.2f}; copy-trading risk is elevated."
+        )
+    buy_trade_window = window_by_size(summary.get("recent_buy_trade_windows", []), window_size)
+    if int(buy_trade_window.get("marked_count") or 0) >= min_marked and float(buy_trade_window.get("estimated_pnl") or 0.0) < 0:
+        summary["warnings"].append(
+            f"recent_buy_trade_window_loss_detected: last {window_size} BUY trades have estimated mark-to-market PnL "
+            f"{float(buy_trade_window.get('estimated_pnl') or 0.0):,.2f}; copy-trading risk is elevated."
+        )
+    market_window = window_by_size(summary.get("recent_market_windows", []), window_size)
+    if int(market_window.get("available_count") or 0) >= min_marked and float(market_window.get("trading_pnl") or 0.0) < 0:
+        summary["warnings"].append(
+            f"recent_market_window_loss_detected: last {window_size} timestamped markets have trading PnL "
+            f"{float(market_window.get('trading_pnl') or 0.0):,.2f}."
+        )
 
 
 def aggregate_market_metrics(results: list[dict[str, Any]], config: dict[str, float]) -> dict[str, Any]:
@@ -713,6 +1171,7 @@ def build_warnings(
     config: dict[str, float],
 ) -> list[str]:
     warnings: list[str] = []
+    warnings.extend(getattr(wallet_data, "fetch_warnings", ()))
     if max_records and any(count >= max_records for count in wallet_data.counts.values()):
         warnings.append("Dữ liệu có thể bị truncate vì ít nhất một endpoint chạm max_records.")
     if unmapped_records:

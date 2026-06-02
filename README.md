@@ -117,6 +117,15 @@ mypy .
 - `top1_contribution_net_pnl = top1_positive_pnl / net_total_trading_pnl` có thể lớn hơn 100% nếu market thắng lớn đang bù lỗ cho các market khác. Ví dụ top1 lời $1,500, các market khác lỗ $500, net PnL $1,000 → contribution 150%. Đây là tín hiệu one-hit wonder, không phải bug.
 - `top1_share_of_gross_profit = top1_positive_pnl / gross_positive_pnl` dùng tổng gross profit làm mẫu số nên dễ đọc hơn và nằm trong 0–100%.
 
+### Phong độ gần đây / copy risk
+
+- `recent_buy_trade_3d` / `recent_trade_3d` / `recent_market_3d`: phong độ 3 ngày gần nhất, là phần chính để đánh giá copy risk ngắn hạn.
+- `recent_buy_trade_windows`: mark-to-market estimate cho các cửa sổ BUY gần nhất (`10`, `25`, `50`). BUY-only phù hợp hơn để đánh giá rủi ro copy entry mới; SELL thường là lệnh thoát vị thế. Các cửa sổ này là bảng tham khảo phụ sau 3D.
+- `recent_trade_windows`: mark-to-market estimate cho tất cả trade gần nhất, dùng như tín hiệu phụ.
+- `recent_market_windows`: PnL market-level gần nhất, sắp theo timestamp mới nhất.
+- `recent_7d_trade_count`, `recent_7d_trade_notional`, `recent_7d_avg_trades_per_day`, `recent_7d_frequency_label`: tần suất trade trong 7 ngày gần nhất, tính từ dữ liệu `/trades` cộng với `/activity` type `TRADE` đã dedupe, tương đối theo timestamp trade mới nhất trong dữ liệu ví.
+- `recent_copy_risk_level`: cảnh báo `high`/`medium` nếu 3 ngày gần nhất hoặc các cửa sổ BUY gần nhất đang lỗ theo mark-to-market estimate. Đây là cảnh báo cho người muốn copy ví, không thay thế verdict skill dài hạn.
+
 ### Verdict
 
 - `insufficient_data`: quá ít market hoặc dữ liệu không đủ để kết luận. Với sample nhỏ (<10 market), analyzer không kết luận chắc là lucky dù có pattern one-hit; thay vào đó thêm warning `low_sample_one_hit_pattern_detected` nếu thấy tín hiệu này.

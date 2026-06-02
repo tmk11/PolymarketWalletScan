@@ -102,6 +102,70 @@ metric_cols[2].metric(
 metric_cols[3].metric("Confidence", summary.get("confidence_level", "medium"))
 metric_cols[4].metric("Unmapped", f"{summary.get('unmapped_records_count', 0):,}")
 
+st.subheader("📉 Phong độ gần đây / Copy risk")
+risk_styles = {"high": st.error, "medium": st.warning, "low": st.success, "unknown": st.info}
+risk_level = summary.get("recent_copy_risk_level", "unknown")
+risk_box = risk_styles.get(risk_level, st.info)
+risk_box(f"**Copy risk: {risk_level.upper()}** — {summary.get('recent_copy_risk_reason', '')}")
+
+recent_cols = st.columns(4)
+recent_cols[0].metric("3 ngày BUY est. PnL", money(summary.get("recent_3d_buy_estimated_pnl")))
+recent_cols[1].metric("3 ngày BUY ROI", pct(summary.get("recent_3d_buy_roi")))
+recent_cols[2].metric("3 ngày market PnL", money(summary.get("recent_3d_market_pnl")))
+recent_cols[3].metric("3 ngày market ROI", pct(summary.get("recent_3d_market_roi_buy_notional")))
+
+freq_cols = st.columns(4)
+freq_cols[0].metric("Trades 3 ngày", f"{summary.get('recent_3d_trade_count', 0):,}")
+freq_cols[1].metric("Trades/ngày", f"{summary.get('recent_3d_avg_trades_per_day', 0.0):,.1f}")
+freq_cols[2].metric("Volume 3 ngày", money(summary.get("recent_3d_trade_notional")))
+freq_cols[3].metric("Tần suất 3 ngày", str(summary.get("recent_3d_frequency_label", "none")).upper())
+
+trade_windows = pd.DataFrame(summary.get("recent_trade_windows", []))
+buy_trade_windows = pd.DataFrame(summary.get("recent_buy_trade_windows", []))
+market_windows = pd.DataFrame(summary.get("recent_market_windows", []))
+if not trade_windows.empty or not market_windows.empty:
+    tab_buy_trades, tab_trades, tab_markets = st.tabs(["Recent BUY trades", "Recent all trades", "Recent markets"])
+    with tab_buy_trades:
+        st.caption("BUY-only window phù hợp hơn để đánh giá rủi ro copy entry mới của ví. Cards phía trên dùng 3 ngày gần nhất; bảng này giữ thêm cửa sổ 10/25/50 trade để tham khảo.")
+        st.dataframe(
+            buy_trade_windows,
+            use_container_width=True,
+            hide_index=True,
+            column_config={
+                "estimated_pnl": st.column_config.NumberColumn("Est. PnL", format="$%.2f"),
+                "marked_notional": st.column_config.NumberColumn("Marked notional", format="$%.2f"),
+                "roi_mark_to_market": st.column_config.NumberColumn("ROI", format="%.2f%%"),
+                "losing_rate": st.column_config.NumberColumn("Losing rate", format="%.2f%%"),
+            },
+        )
+    with tab_trades:
+        st.caption("Trade PnL là mark-to-market estimate theo giá hiện tại/settled của outcome; dùng để cảnh báo rủi ro copy gần đây.")
+        st.json(summary.get("recent_trade_frequency", {}), expanded=False)
+        st.dataframe(
+            trade_windows,
+            use_container_width=True,
+            hide_index=True,
+            column_config={
+                "estimated_pnl": st.column_config.NumberColumn("Est. PnL", format="$%.2f"),
+                "marked_notional": st.column_config.NumberColumn("Marked notional", format="$%.2f"),
+                "roi_mark_to_market": st.column_config.NumberColumn("ROI", format="%.2f%%"),
+                "losing_rate": st.column_config.NumberColumn("Losing rate", format="%.2f%%"),
+            },
+        )
+    with tab_markets:
+        st.caption("Market window dùng PnL market-level đã aggregate, sắp theo timestamp mới nhất.")
+        st.dataframe(
+            market_windows,
+            use_container_width=True,
+            hide_index=True,
+            column_config={
+                "trading_pnl": st.column_config.NumberColumn("Trading PnL", format="$%.2f"),
+                "buy_notional": st.column_config.NumberColumn("Buy notional", format="$%.2f"),
+                "roi_buy_notional": st.column_config.NumberColumn("ROI buy", format="%.2f%%"),
+                "win_rate": st.column_config.NumberColumn("Win rate", format="%.2f%%"),
+            },
+        )
+
 st.subheader("🎯 Skilled hay Ăn may?")
 
 verdict_styles = {
