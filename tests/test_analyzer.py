@@ -83,6 +83,9 @@ def test_classify_market() -> None:
     assert classify_market("Will Ethereum ETF be approved?") == "Crypto"
     assert classify_market("NBA finals winner") == "Sports"
     assert classify_market("Fed cuts interest rate") == "Economy/Fed"
+    assert classify_market("Will the highest temperature in Singapore be 29°C?") == "Weather"
+    assert classify_market("Rainbow Six Siege: All Gamers vs WolvesY (BO3)") == "Sports"
+    assert classify_market("Will Maddie Mastro win gold medal for Snowboard Halfpipe?") == "Sports"
     assert classify_market("Some niche market") == "Other"
 
 
@@ -185,6 +188,22 @@ def test_summary_output_has_new_contract_fields() -> None:
         "winning_markets",
         "losing_markets",
         "market_win_rate",
+        "meaningful_market_win_rate",
+        "non_low_value_market_win_rate",
+        "low_value_winning_markets",
+        "low_value_winning_markets_ratio",
+        "low_value_wins_profit_share",
+        "win_rate_quality_gap",
+        "win_rate_padding_suspected",
+        "win_rate_padding_severity",
+        "metric_gaming_flags",
+        "metric_gaming_flags_count",
+        "small_bet_roi_padding_suspected",
+        "correlated_cluster_suspected",
+        "tail_risk_suspected",
+        "unrealized_pnl_dominance_suspected",
+        "reward_dependency_suspected",
+        "recent_performance_divergence_suspected",
         "total_cost_basis",
         "total_buy_notional",
         "total_max_capital_at_risk",
@@ -358,8 +377,109 @@ def test_evenly_profitable_50_market_wallet_is_skilled() -> None:
     summary = analyze_wallet(_test_wallet(closed_positions=closed_positions))["summary"]
 
     assert summary["verdict"] == "skilled"
+    assert summary["win_rate_padding_suspected"] is False
+    assert summary["meaningful_market_win_rate"] == summary["market_win_rate"]
     assert summary["roi_ex_top1_buy_notional"] > 0
     assert summary["top1_contribution_net_pnl"] < 0.4
+
+
+def test_low_value_win_padding_blocks_skilled_verdict() -> None:
+    closed_positions = []
+    for index in range(20):
+        closed_positions.append(
+            {
+                "conditionId": f"tiny-{index}",
+                "eventSlug": f"weather-padding-{index}",
+                "title": f"Will the highest temperature in City {index} be 29°C?",
+                "asset": f"tiny-asset-{index}",
+                "outcome": "Yes",
+                "totalBought": 100.0,
+                "avgPrice": 0.99,
+                "curPrice": 1.0,
+                "realizedPnl": 0.10,
+            }
+        )
+    for index in range(15):
+        closed_positions.append(
+            {
+                "conditionId": f"real-win-{index}",
+                "eventSlug": f"independent-real-{index}",
+                "title": f"Weather market real win {index}",
+                "asset": f"real-win-asset-{index}",
+                "outcome": "Yes",
+                "totalBought": 100.0,
+                "avgPrice": 0.50,
+                "curPrice": 1.0,
+                "realizedPnl": 50.0,
+            }
+        )
+    for index in range(5):
+        closed_positions.append(
+            {
+                "conditionId": f"loss-{index}",
+                "eventSlug": f"independent-loss-{index}",
+                "title": f"Weather market loss {index}",
+                "asset": f"loss-asset-{index}",
+                "outcome": "Yes",
+                "totalBought": 100.0,
+                "avgPrice": 0.50,
+                "curPrice": 0.0,
+                "realizedPnl": -40.0,
+            }
+        )
+
+    report = analyze_wallet(_test_wallet(closed_positions=closed_positions))
+    summary = report["summary"]
+    weather = next(row for row in report["category_breakdown"] if row["category"] == "Weather")
+
+    assert summary["market_win_rate"] == 0.875
+    assert summary["meaningful_market_win_rate"] == 0.375
+    assert summary["low_value_winning_markets"] == 20
+    assert summary["win_rate_quality_gap"] == 0.5
+    assert summary["win_rate_padding_suspected"] is True
+    assert summary["verdict"] != "skilled"
+    assert "win_rate_padding_cap" in report["skill"]["score_adjustment"]["reasons"]
+    assert weather["win_rate_padding_suspected"] is True
+    assert weather["verdict"] == "inconclusive"
+    assert any("win_rate_padding_suspected" in warning for warning in summary["warnings"])
+
+
+def test_small_bet_high_roi_padding_is_detected() -> None:
+    closed_positions = [_closed_pnl_market(f"small-roi-{index}", 10, buy_notional=10) for index in range(10)]
+    closed_positions.append(_closed_pnl_market("large-real-profit", 5000, buy_notional=5000))
+
+    summary = analyze_wallet(_test_wallet(closed_positions=closed_positions))["summary"]
+
+    assert summary["small_bet_high_roi_wins"] == 10
+    assert summary["small_bet_roi_padding_suspected"] is True
+    assert "small_bet_roi_padding" in {flag["name"] for flag in summary["metric_gaming_flags"]}
+
+
+def test_correlated_cluster_padding_is_detected() -> None:
+    closed_positions = []
+    for index in range(8):
+        row = _closed_pnl_market(f"cluster-{index}", 100, buy_notional=100)
+        row["eventSlug"] = "same-underlying-event"
+        closed_positions.append(row)
+    for index in range(8):
+        closed_positions.append(_closed_pnl_market(f"independent-{index}", 5, buy_notional=100))
+
+    summary = analyze_wallet(_test_wallet(closed_positions=closed_positions))["summary"]
+
+    assert summary["correlated_cluster_suspected"] is True
+    assert summary["top_event_cluster_markets"] == 8
+    assert "correlated_cluster" in {flag["name"] for flag in summary["metric_gaming_flags"]}
+
+
+def test_tail_risk_strategy_is_detected() -> None:
+    closed_positions = [_closed_pnl_market(f"small-win-{index}", 2, buy_notional=100) for index in range(30)]
+    closed_positions.append(_closed_pnl_market("large-tail-loss", -500, buy_notional=500))
+
+    summary = analyze_wallet(_test_wallet(closed_positions=closed_positions))["summary"]
+
+    assert summary["tail_risk_suspected"] is True
+    assert summary["largest_loss_to_median_win"] >= 200
+    assert "tail_risk" in {flag["name"] for flag in summary["metric_gaming_flags"]}
 
 
 def test_buy_notional_roi_can_differ_from_cost_basis_roi() -> None:

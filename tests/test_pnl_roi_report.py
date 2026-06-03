@@ -243,6 +243,9 @@ def test_skill_report_keeps_legacy_ui_sections() -> None:
     assert "breadth" in skill
     assert "consistency" in skill
     assert "edge" in skill
+    assert "copy_suitability_score" in skill
+    assert "copy_suitability_components" in skill
+    assert "copy_suitability_adjustment" in skill
     assert "ci_low" in skill["significance"]
     assert "sharpe" in skill["risk"]
     assert "profit_factor" in skill["risk"]

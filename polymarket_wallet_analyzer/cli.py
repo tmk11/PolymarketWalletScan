@@ -48,6 +48,17 @@ def main() -> int:
     print(f"ROI buy notional: {_fmt_pct(summary.get('roi_buy_notional'))}")
     print(f"ROI max capital at risk: {_fmt_pct(summary.get('roi_max_capital_at_risk'))}")
     print(f"Win rate: {_fmt_pct(summary.get('market_win_rate'))}")
+    print(f"Meaningful win rate: {_fmt_pct(summary.get('meaningful_market_win_rate'))}")
+    print(
+        "Low-value wins: "
+        f"{summary.get('low_value_winning_markets', 0)} "
+        f"({_fmt_pct(summary.get('low_value_winning_markets_ratio'))}), "
+        f"profit share {_fmt_pct(summary.get('low_value_wins_profit_share'))}, "
+        f"padding suspected {summary.get('win_rate_padding_suspected')}"
+    )
+    flags = summary.get("metric_gaming_flags") or []
+    if flags:
+        print("Metric gaming flags: " + ", ".join(str(flag.get("name")) for flag in flags))
     print(f"Median market ROI: {_fmt_pct(summary.get('median_market_roi'))}")
     print(
         "ROI ex top1/top3/top5 buy: "
@@ -106,7 +117,21 @@ def main() -> int:
     score_adjustment = skill.get("score_adjustment") or {}
     print(f"Skill score: {score if score is not None else 'N/A'}/100  [{skill.get('verdict_label', 'N/A')}]")
     if score_adjustment.get("applied") and raw_score is not None:
-        print(f"Raw score: {raw_score}/100  (capped at {score_adjustment.get('cap')}/100 due to verdict/concentration risk)")
+        reasons = ", ".join(score_adjustment.get("reasons", [])[:3]) or score_adjustment.get("reason")
+        print(f"Raw score: {raw_score}/100  (capped at {score_adjustment.get('cap')}/100: {reasons})")
+    copy_score = skill.get("copy_suitability_score")
+    print(
+        "Copy suitability: "
+        f"{copy_score if copy_score is not None else 'N/A'}/100  "
+        f"[{skill.get('copy_suitability_label', 'N/A')}]; {skill.get('copy_suitability_detail', '')}"
+    )
+    copy_adjustment = skill.get("copy_suitability_adjustment") or {}
+    if copy_adjustment.get("applied"):
+        reasons = ", ".join(copy_adjustment.get("reasons", [])[:3]) or copy_adjustment.get("reason")
+        print(
+            f"Raw copy score: {copy_adjustment.get('raw_score')}/100  "
+            f"(capped at {copy_adjustment.get('cap')}/100: {reasons})"
+        )
     print(f"Confidence: {skill.get('confidence', 'medium')}" + ("  (DỮ LIỆU BỊ CẮT)" if skill.get("data_truncated") else ""))
     print(f"-> {skill.get('verdict_detail', '')}")
     print("Breakdown:")

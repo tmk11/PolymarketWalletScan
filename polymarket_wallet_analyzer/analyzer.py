@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import random
+import re
 from collections import defaultdict
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -36,6 +37,46 @@ DEFAULT_SKILL_CONFIG: dict[str, float] = {
     "low_confidence_top1_contribution": 0.70,
     "one_hit_skill_score_cap": 65,
     "low_sample_one_hit_skill_score_cap": 55,
+    "insufficient_data_skill_score_cap": 60,
+    "inconclusive_skill_score_cap": 72,
+    "category_skilled_skill_score_cap": 78,
+    "low_confidence_skill_score_cap": 70,
+    "data_truncated_skill_score_cap": 60,
+    "recent_copy_risk_high_skill_score_cap": 55,
+    "recent_copy_risk_medium_skill_score_cap": 70,
+    "weak_hit_rate_skill_score_cap": 75,
+    "win_rate_padding_skill_score_cap": 60,
+    "low_value_win_max_pnl": 1.0,
+    "low_value_win_max_roi": 0.02,
+    "low_value_win_max_pnl_for_low_roi": 10.0,
+    "meaningful_win_min_pnl": 1.0,
+    "meaningful_win_min_roi": 0.02,
+    "near_certain_entry_price": 0.95,
+    "win_rate_padding_min_wins": 8,
+    "win_rate_padding_min_tiny_win_ratio": 0.50,
+    "win_rate_padding_max_profit_share": 0.05,
+    "win_rate_padding_min_quality_gap": 0.25,
+    "metric_gaming_skill_score_cap": 65,
+    "small_bet_max_buy_notional": 25.0,
+    "small_bet_high_roi_min": 0.50,
+    "small_bet_high_roi_min_count": 5,
+    "small_bet_high_roi_min_ratio": 0.30,
+    "small_bet_profit_share_max": 0.10,
+    "roi_padding_unweighted_to_weighted_ratio": 5.0,
+    "correlated_cluster_min_markets": 5,
+    "correlated_cluster_profit_share": 0.40,
+    "market_to_effective_bets_ratio": 2.0,
+    "tail_risk_min_win_rate": 0.70,
+    "tail_risk_loss_to_median_win": 20.0,
+    "tail_risk_min_loss": 100.0,
+    "unrealized_dominance_ratio": 0.50,
+    "reward_dependency_ratio": 0.20,
+    "copy_score_high_risk_cap": 45,
+    "copy_score_medium_risk_cap": 65,
+    "copy_score_low_confidence_cap": 60,
+    "copy_score_insufficient_data_cap": 55,
+    "copy_score_one_hit_cap": 65,
+    "copy_score_unprofitable_cap": 30,
     "recent_trade_warning_window": 50,
     "recent_trade_warning_min_marked": 20,
     "recent_trade_warning_roi": 0.0,
@@ -441,6 +482,7 @@ def summarize_results(
             "low_sample_one_hit_pattern_detected: top market concentration/ROI ex-top1 looks one-hit-like, "
             "but sample size is too small for a lucky verdict."
         )
+    add_metric_gaming_flags(summary, config)
     summary["confidence_level"] = confidence_level(summary, config)
     summary["skill_confidence"] = summary["confidence_level"]
     return add_legacy_summary_aliases(summary)
@@ -459,11 +501,12 @@ def default_resolver_stats() -> dict[str, int | bool]:
 
 
 def recent_performance_metrics(results: list[dict[str, Any]], wallet_data: WalletData) -> dict[str, Any]:
+    mark_price_lookup = build_mark_price_lookup(wallet_data)
     market_windows = recent_market_windows(results)
-    trade_windows = recent_trade_windows(wallet_data)
-    buy_trade_windows = recent_trade_windows(wallet_data, side_filter="BUY")
-    trade_3d = recent_trade_time_window(wallet_data, days=3)
-    buy_trade_3d = recent_trade_time_window(wallet_data, days=3, side_filter="BUY")
+    trade_windows = recent_trade_windows(wallet_data, mark_price_lookup=mark_price_lookup)
+    buy_trade_windows = recent_trade_windows(wallet_data, side_filter="BUY", mark_price_lookup=mark_price_lookup)
+    trade_3d = recent_trade_time_window(wallet_data, days=3, mark_price_lookup=mark_price_lookup)
+    buy_trade_3d = recent_trade_time_window(wallet_data, days=3, side_filter="BUY", mark_price_lookup=mark_price_lookup)
     market_3d = recent_market_time_window(results, days=3)
     trade_frequency = recent_trade_frequency(wallet_data, days=7)
     copy_risk_level, copy_risk_reason = recent_copy_risk(
@@ -563,7 +606,12 @@ def recent_trade_frequency(wallet_data: WalletData, days: int = 7) -> dict[str, 
     }
 
 
-def recent_trade_time_window(wallet_data: WalletData, days: int, side_filter: str | None = None) -> dict[str, Any]:
+def recent_trade_time_window(
+    wallet_data: WalletData,
+    days: int,
+    side_filter: str | None = None,
+    mark_price_lookup: dict[str, float] | None = None,
+) -> dict[str, Any]:
     trades = [trade for trade in wallet_trade_records(wallet_data) if maybe_num(trade, "timestamp") is not None]
     if side_filter:
         trades = [trade for trade in trades if text(trade, "side").upper() == side_filter]
@@ -573,7 +621,7 @@ def recent_trade_time_window(wallet_data: WalletData, days: int, side_filter: st
     reference_timestamp = max(num(trade, "timestamp") for trade in trades)
     window_start = reference_timestamp - days * SECONDS_PER_DAY
     recent_trades = [trade for trade in trades if num(trade, "timestamp") >= window_start]
-    estimates = [estimate_trade_mark_to_market(trade, wallet_data) for trade in recent_trades]
+    estimates = [estimate_trade_mark_to_market(trade, wallet_data, mark_price_lookup) for trade in recent_trades]
     marked_rows = [row for row in estimates if row["estimated_pnl"] is not None]
     estimated_pnl = sum(float(row["estimated_pnl"] or 0.0) for row in marked_rows)
     marked_notional = sum(float(row["notional"] or 0.0) for row in marked_rows)
@@ -694,12 +742,17 @@ def recent_market_time_window(results: list[dict[str, Any]], days: int) -> dict[
     }
 
 
-def recent_trade_windows(wallet_data: WalletData, side_filter: str | None = None) -> list[dict[str, Any]]:
+def recent_trade_windows(
+    wallet_data: WalletData,
+    side_filter: str | None = None,
+    mark_price_lookup: dict[str, float] | None = None,
+) -> list[dict[str, Any]]:
     trades = [trade for trade in wallet_trade_records(wallet_data) if maybe_num(trade, "timestamp") is not None]
     if side_filter:
         trades = [trade for trade in trades if text(trade, "side").upper() == side_filter]
     trades.sort(key=lambda trade: num(trade, "timestamp"), reverse=True)
-    estimates = [estimate_trade_mark_to_market(trade, wallet_data) for trade in trades]
+    max_window = max(RECENT_WINDOWS)
+    estimates = [estimate_trade_mark_to_market(trade, wallet_data, mark_price_lookup) for trade in trades[:max_window]]
     windows = []
     for window_size in RECENT_WINDOWS:
         rows = estimates[:window_size]
@@ -753,8 +806,12 @@ def trade_dedupe_key(record: dict[str, Any]) -> tuple[str, str, str, str, str, s
     )
 
 
-def estimate_trade_mark_to_market(trade: dict[str, Any], wallet_data: WalletData) -> dict[str, Any]:
-    mark_price = outcome_mark_price(trade, wallet_data)
+def estimate_trade_mark_to_market(
+    trade: dict[str, Any],
+    wallet_data: WalletData,
+    mark_price_lookup: dict[str, float] | None = None,
+) -> dict[str, Any]:
+    mark_price = outcome_mark_price(trade, wallet_data, mark_price_lookup)
     price = num(trade, "price")
     size = num(trade, "size")
     side = text(trade, "side").upper()
@@ -778,11 +835,20 @@ def estimate_trade_mark_to_market(trade: dict[str, Any], wallet_data: WalletData
         "estimated_pnl": estimated_pnl,
     }
 
-
-def outcome_mark_price(trade: dict[str, Any], wallet_data: WalletData) -> float | None:
+def outcome_mark_price(
+    trade: dict[str, Any],
+    wallet_data: WalletData,
+    mark_price_lookup: dict[str, float] | None = None,
+) -> float | None:
     outcome_key = get_outcome_key(trade)
     token = first_text([trade], "asset", "token_id", "tokenId", "clobTokenId")
     fallback_key = outcome_fallback_key(trade)
+    if mark_price_lookup is not None:
+        for key in mark_price_lookup_keys(outcome_key, token, fallback_key):
+            if key in mark_price_lookup:
+                return mark_price_lookup[key]
+        return None
+
     for record in wallet_data.positions + wallet_data.closed_positions:
         record_mark = mark_price_from_record(record)
         if record_mark is None:
@@ -795,6 +861,29 @@ def outcome_mark_price(trade: dict[str, Any], wallet_data: WalletData) -> float 
             return record_mark
     return None
 
+def build_mark_price_lookup(wallet_data: WalletData) -> dict[str, float]:
+    lookup: dict[str, float] = {}
+    for record in wallet_data.positions + wallet_data.closed_positions:
+        record_mark = mark_price_from_record(record)
+        if record_mark is None:
+            continue
+        outcome_key = get_outcome_key(record)
+        fallback_key = outcome_fallback_key(record)
+        for key in mark_price_lookup_keys(outcome_key, None, fallback_key):
+            lookup.setdefault(key, record_mark)
+        for token in token_candidates(record):
+            lookup.setdefault(f"token:{token}", record_mark)
+    return lookup
+
+def mark_price_lookup_keys(outcome_key: str | None, token: str | None, fallback_key: str | None) -> list[str]:
+    keys = []
+    if outcome_key:
+        keys.append(f"outcome:{outcome_key}")
+    if token:
+        keys.append(f"token:{token}")
+    if fallback_key:
+        keys.append(f"fallback:{fallback_key}")
+    return keys
 
 def outcome_fallback_key(record: dict[str, Any]) -> str | None:
     market_key = explicit_market_key(record)
@@ -908,6 +997,65 @@ def add_recent_performance_warnings(summary: dict[str, Any], config: dict[str, f
         )
 
 
+
+def add_metric_gaming_flags(summary: dict[str, Any], config: dict[str, float]) -> None:
+    summary["recent_performance_divergence_suspected"] = recent_performance_divergence(summary)
+    flag_specs = [
+        (
+            "win_rate_padding",
+            summary.get("win_rate_padding_suspected"),
+            "Raw win rate cao nhưng meaningful win rate thấp do nhiều low-value wins.",
+        ),
+        (
+            "small_bet_roi_padding",
+            summary.get("small_bet_roi_padding_suspected"),
+            "ROI/mean ROI có thể bị làm đẹp bởi nhiều kèo nhỏ ROI cao nhưng PnL đóng góp thấp.",
+        ),
+        (
+            "correlated_cluster",
+            summary.get("correlated_cluster_suspected"),
+            "Nhiều market có thể cùng một event/cụm correlated, làm số market nhìn đa dạng hơn thực tế.",
+        ),
+        (
+            "tail_risk",
+            summary.get("tail_risk_suspected"),
+            "Mẫu hình thắng nhiều khoản nhỏ nhưng có loss lớn; giống chiến lược tail-risk/pennies in front of steamroller.",
+        ),
+        (
+            "unrealized_pnl_dominance",
+            summary.get("unrealized_pnl_dominance_suspected"),
+            "PnL phụ thuộc nhiều vào unrealized/open positions, chưa phải lợi nhuận đã chốt.",
+        ),
+        (
+            "reward_dependency",
+            summary.get("reward_dependency_suspected"),
+            "Lợi nhuận phụ thuộc nhiều vào reward/rebate, không nên trộn với trading skill.",
+        ),
+        (
+            "recent_performance_divergence",
+            summary.get("recent_performance_divergence_suspected"),
+            "Long-term PnL tốt nhưng recent/copy risk đang xấu; không nên copy chỉ vì leaderboard.",
+        ),
+    ]
+    flags = [{"name": name, "detail": detail} for name, active, detail in flag_specs if active]
+    summary["metric_gaming_flags"] = flags
+    summary["metric_gaming_flags_count"] = len(flags)
+    if flags:
+        names = ", ".join(flag["name"] for flag in flags)
+        summary["warnings"].append(f"metric_gaming_flags_detected: {names}.")
+
+
+def recent_performance_divergence(summary: dict[str, Any]) -> bool:
+    if float(summary.get("trading_pnl") or 0.0) <= 0:
+        return False
+    if summary.get("recent_copy_risk_level") == "high":
+        return True
+    if int(summary.get("recent_3d_buy_marked_count") or 0) >= 10 and float(summary.get("recent_3d_buy_estimated_pnl") or 0.0) < 0:
+        return True
+    if int(summary.get("recent_buy_trade_50_marked_count") or 0) >= 20 and float(summary.get("recent_buy_trade_50_estimated_pnl") or 0.0) < 0:
+        return True
+    return False
+
 def aggregate_market_metrics(results: list[dict[str, Any]], config: dict[str, float]) -> dict[str, Any]:
     total_markets = len(results)
     trading_pnl = sum(row_pnl(row) for row in results)
@@ -924,6 +1072,7 @@ def aggregate_market_metrics(results: list[dict[str, Any]], config: dict[str, fl
     roi_values = [float(row["roi_cost_basis"]) for row in results if row.get("roi_cost_basis") is not None]
     buy_roi_values = [float(row["roi_buy_notional"]) for row in results if row.get("roi_buy_notional") is not None]
     monthly_pnl = monthly_pnl_rows(results)
+    padding_metrics = win_rate_quality_metrics(results, config, gross_profit)
 
     top1_pnl = sum(row_pnl(row) for row in positive_rows[:1])
     top3_pnl = sum(row_pnl(row) for row in positive_rows[:3])
@@ -971,6 +1120,17 @@ def aggregate_market_metrics(results: list[dict[str, Any]], config: dict[str, fl
         sum(float(row.get("roi_cost_basis") or 0.0) * float(row.get("cost_basis") or 0.0) for row in results),
         cost_basis,
     )
+    gaming_metrics = metric_gaming_quality_metrics(
+        results,
+        config,
+        trading_pnl=trading_pnl,
+        gross_profit=gross_profit,
+        gross_loss=gross_loss,
+        unrealized_pnl=unrealized_pnl,
+        rewards_pnl=rewards_pnl,
+        roi_buy_notional=safe_div_zero(trading_pnl, buy_notional),
+        mean_buy_roi_unweighted=mean(buy_roi_values) if buy_roi_values else 0.0,
+    )
 
     return {
         "trading_pnl": trading_pnl,
@@ -982,6 +1142,7 @@ def aggregate_market_metrics(results: list[dict[str, Any]], config: dict[str, fl
         "winning_markets": sum(1 for row in results if row_pnl(row) > 0),
         "losing_markets": sum(1 for row in results if row_pnl(row) < 0),
         "market_win_rate": safe_div(sum(1 for row in results if row_pnl(row) > 0), total_markets) or 0.0,
+        **padding_metrics,
         "total_cost_basis": cost_basis,
         "cost_basis": cost_basis,
         "total_buy_notional": buy_notional,
@@ -1023,11 +1184,223 @@ def aggregate_market_metrics(results: list[dict[str, Any]], config: dict[str, fl
         "monthly_pnl": monthly_pnl,
         "is_one_hit_wonder": is_one_hit,
         "is_top3_dependent": is_top3_dependent,
+        **gaming_metrics,
         "top_market_title": positive_rows[0]["title"] if positive_rows else "",
         "top_market_pnl": top1_pnl,
         "outcome_level_edge": aggregate_outcome_edges(results),
     }
 
+
+
+def win_rate_quality_metrics(
+    results: list[dict[str, Any]],
+    config: dict[str, float],
+    gross_profit: float,
+) -> dict[str, Any]:
+    total_markets = len(results)
+    winning_rows = [row for row in results if row_pnl(row) > 0]
+    low_value_wins = [row for row in winning_rows if is_low_value_winning_market(row, config)]
+    meaningful_wins = [row for row in results if is_meaningful_winning_market(row, config)]
+    near_certain_wins = [row for row in winning_rows if is_near_certain_winning_market(row, config)]
+
+    low_value_win_count = len(low_value_wins)
+    winning_count = len(winning_rows)
+    raw_win_rate = safe_div(winning_count, total_markets) or 0.0
+    meaningful_win_rate = safe_div(len(meaningful_wins), total_markets) or 0.0
+    non_low_value_denominator = total_markets - low_value_win_count
+    non_low_value_win_rate = safe_div(winning_count - low_value_win_count, non_low_value_denominator) or 0.0
+    low_value_profit = sum(row_pnl(row) for row in low_value_wins)
+    low_value_buy_notional = sum(float(row.get("total_buy_notional") or 0.0) for row in low_value_wins)
+    low_value_ratio = safe_div(low_value_win_count, winning_count) or 0.0
+    low_value_profit_share = safe_div_zero(low_value_profit, gross_profit) if gross_profit > 0 else 0.0
+    quality_gap = max(0.0, raw_win_rate - meaningful_win_rate)
+    suspected = all(
+        (
+            winning_count >= config["win_rate_padding_min_wins"],
+            low_value_ratio >= config["win_rate_padding_min_tiny_win_ratio"],
+            low_value_profit_share <= config["win_rate_padding_max_profit_share"],
+            quality_gap >= config["win_rate_padding_min_quality_gap"],
+        )
+    )
+    severity = "none"
+    if suspected:
+        severity = "high" if low_value_ratio >= 0.70 and quality_gap >= 0.50 else "medium"
+
+    return {
+        "low_value_winning_markets": low_value_win_count,
+        "low_value_winning_markets_ratio": low_value_ratio,
+        "low_value_wins_profit": low_value_profit,
+        "low_value_wins_profit_share": low_value_profit_share,
+        "low_value_wins_buy_notional": low_value_buy_notional,
+        "meaningful_winning_markets": len(meaningful_wins),
+        "meaningful_market_win_rate": meaningful_win_rate,
+        "non_low_value_market_win_rate": non_low_value_win_rate,
+        "win_rate_quality_gap": quality_gap,
+        "near_certain_winning_markets": len(near_certain_wins),
+        "win_rate_padding_suspected": suspected,
+        "low_value_win_padding_suspected": suspected,
+        "win_rate_padding_severity": severity,
+    }
+
+
+def is_low_value_winning_market(row: dict[str, Any], config: dict[str, float]) -> bool:
+    pnl = row_pnl(row)
+    if pnl <= 0:
+        return False
+    roi_buy = row.get("roi_buy_notional")
+    if pnl <= config["low_value_win_max_pnl"]:
+        return True
+    if roi_buy is not None and float(roi_buy) <= config["low_value_win_max_roi"]:
+        return pnl <= config["low_value_win_max_pnl_for_low_roi"]
+    return is_near_certain_winning_market(row, config) and pnl <= config["low_value_win_max_pnl_for_low_roi"]
+
+
+def is_meaningful_winning_market(row: dict[str, Any], config: dict[str, float]) -> bool:
+    pnl = row_pnl(row)
+    if pnl <= 0:
+        return False
+    roi_buy = row.get("roi_buy_notional")
+    if roi_buy is None:
+        return pnl >= config["meaningful_win_min_pnl"]
+    return pnl >= config["meaningful_win_min_pnl"] and float(roi_buy) >= config["meaningful_win_min_roi"]
+
+
+def is_near_certain_winning_market(row: dict[str, Any], config: dict[str, float]) -> bool:
+    if row_pnl(row) <= 0:
+        return False
+    avg_entry = row.get("avg_entry_price")
+    return avg_entry is not None and float(avg_entry) >= config["near_certain_entry_price"]
+
+
+def metric_gaming_quality_metrics(
+    results: list[dict[str, Any]],
+    config: dict[str, float],
+    *,
+    trading_pnl: float,
+    gross_profit: float,
+    gross_loss: float,
+    unrealized_pnl: float,
+    rewards_pnl: float,
+    roi_buy_notional: float,
+    mean_buy_roi_unweighted: float,
+) -> dict[str, Any]:
+    winners = [row for row in results if row_pnl(row) > 0]
+    small_high_roi_wins = [row for row in winners if is_small_bet_high_roi_win(row, config)]
+    small_high_roi_profit = sum(row_pnl(row) for row in small_high_roi_wins)
+    small_high_roi_ratio = safe_div(len(small_high_roi_wins), len(winners)) or 0.0
+    small_high_roi_profit_share = safe_div_zero(small_high_roi_profit, gross_profit) if gross_profit > 0 else 0.0
+    roi_inflation_ratio = safe_div_zero(mean_buy_roi_unweighted, abs(roi_buy_notional)) if abs(roi_buy_notional) > 0 else 0.0
+    small_bet_roi_padding = all(
+        (
+            len(small_high_roi_wins) >= config["small_bet_high_roi_min_count"],
+            small_high_roi_ratio >= config["small_bet_high_roi_min_ratio"],
+            small_high_roi_profit_share <= config["small_bet_profit_share_max"],
+        )
+    ) or (
+        mean_buy_roi_unweighted > 0
+        and roi_buy_notional > 0
+        and roi_inflation_ratio >= config["roi_padding_unweighted_to_weighted_ratio"]
+        and small_high_roi_ratio >= config["small_bet_high_roi_min_ratio"] / 2
+    )
+
+    cluster_metrics = correlated_cluster_metrics(results, config, gross_profit)
+    tail_metrics = tail_risk_metrics(results, config, gross_profit, gross_loss)
+    unrealized_dependency = (
+        trading_pnl > 0 and abs(unrealized_pnl) > abs(trading_pnl) * config["unrealized_dominance_ratio"]
+    )
+    reward_dependency = rewards_pnl > 0 and safe_div_zero(rewards_pnl, abs(trading_pnl) + abs(rewards_pnl)) >= config[
+        "reward_dependency_ratio"
+    ]
+
+    return {
+        "small_bet_high_roi_wins": len(small_high_roi_wins),
+        "small_bet_high_roi_wins_ratio": small_high_roi_ratio,
+        "small_bet_high_roi_profit": small_high_roi_profit,
+        "small_bet_high_roi_profit_share": small_high_roi_profit_share,
+        "roi_inflation_ratio_unweighted_vs_weighted": roi_inflation_ratio,
+        "small_bet_roi_padding_suspected": small_bet_roi_padding,
+        "roi_padding_suspected": small_bet_roi_padding,
+        "unrealized_pnl_dominance_suspected": unrealized_dependency,
+        "reward_dependency_suspected": reward_dependency,
+        **cluster_metrics,
+        **tail_metrics,
+    }
+
+
+def is_small_bet_high_roi_win(row: dict[str, Any], config: dict[str, float]) -> bool:
+    if row_pnl(row) <= 0:
+        return False
+    buy_notional = float(row.get("total_buy_notional") or row.get("buy_notional") or 0.0)
+    roi_buy = row.get("roi_buy_notional")
+    return (
+        buy_notional > 0
+        and buy_notional <= config["small_bet_max_buy_notional"]
+        and roi_buy is not None
+        and float(roi_buy) >= config["small_bet_high_roi_min"]
+    )
+
+
+def correlated_cluster_metrics(results: list[dict[str, Any]], config: dict[str, float], gross_profit: float) -> dict[str, Any]:
+    clusters: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for row in results:
+        key = str(row.get("event_slug") or row.get("market_id") or "")
+        if key:
+            clusters[key].append(row)
+    if not clusters:
+        return {
+            "market_to_effective_bets_ratio": 0.0,
+            "top_event_cluster_key": "",
+            "top_event_cluster_markets": 0,
+            "top_event_cluster_pnl": 0.0,
+            "top_event_cluster_profit_share": 0.0,
+            "correlated_cluster_suspected": False,
+        }
+
+    top_key, top_rows = max(clusters.items(), key=lambda item: (sum(max(row_pnl(row), 0.0) for row in item[1]), len(item[1])))
+    top_cluster_pnl = sum(row_pnl(row) for row in top_rows)
+    top_cluster_profit = sum(max(row_pnl(row), 0.0) for row in top_rows)
+    top_profit_share = safe_div_zero(top_cluster_profit, gross_profit) if gross_profit > 0 else 0.0
+    effective_count = len(clusters)
+    market_to_effective_ratio = safe_div_zero(float(len(results)), float(effective_count))
+    suspected = (
+        len(top_rows) >= config["correlated_cluster_min_markets"]
+        and top_profit_share >= config["correlated_cluster_profit_share"]
+    ) or (market_to_effective_ratio >= config["market_to_effective_bets_ratio"] and len(results) >= 20)
+    return {
+        "market_to_effective_bets_ratio": market_to_effective_ratio,
+        "top_event_cluster_key": top_key,
+        "top_event_cluster_markets": len(top_rows),
+        "top_event_cluster_pnl": top_cluster_pnl,
+        "top_event_cluster_profit_share": top_profit_share,
+        "correlated_cluster_suspected": suspected,
+    }
+
+
+def tail_risk_metrics(
+    results: list[dict[str, Any]], config: dict[str, float], gross_profit: float, gross_loss: float
+) -> dict[str, Any]:
+    winning_pnls = [row_pnl(row) for row in results if row_pnl(row) > 0]
+    losing_pnls = [row_pnl(row) for row in results if row_pnl(row) < 0]
+    median_winning_pnl = median(winning_pnls) if winning_pnls else 0.0
+    largest_loss_abs = abs(min(losing_pnls)) if losing_pnls else 0.0
+    loss_to_median_win = safe_div_zero(largest_loss_abs, median_winning_pnl) if median_winning_pnl > 0 else 0.0
+    win_rate = safe_div(len(winning_pnls), len(results)) or 0.0
+    loss_share_of_gross_profit = safe_div_zero(largest_loss_abs, gross_profit) if gross_profit > 0 else 0.0
+    suspected = all(
+        (
+            win_rate >= config["tail_risk_min_win_rate"],
+            largest_loss_abs >= config["tail_risk_min_loss"],
+            loss_to_median_win >= config["tail_risk_loss_to_median_win"],
+        )
+    )
+    return {
+        "median_winning_pnl": median_winning_pnl,
+        "largest_losing_market_loss": largest_loss_abs,
+        "largest_loss_to_median_win": loss_to_median_win,
+        "largest_loss_share_of_gross_profit": loss_share_of_gross_profit,
+        "tail_risk_suspected": suspected,
+        "pennies_in_front_of_steamroller_suspected": suspected,
+    }
 
 def add_legacy_summary_aliases(summary: dict[str, Any]) -> dict[str, Any]:
     summary["market_count"] = summary["total_markets"]
@@ -1064,6 +1437,20 @@ def build_category_breakdown(results: list[dict[str, Any]], config: dict[str, fl
                 "roi_cost_basis": metrics["roi_cost_basis"],
                 "roi_buy_notional": metrics["roi_buy_notional"],
                 "market_win_rate": metrics["market_win_rate"],
+                "meaningful_market_win_rate": metrics["meaningful_market_win_rate"],
+                "low_value_winning_markets": metrics["low_value_winning_markets"],
+                "low_value_winning_markets_ratio": metrics["low_value_winning_markets_ratio"],
+                "low_value_wins_profit_share": metrics["low_value_wins_profit_share"],
+                "win_rate_quality_gap": metrics["win_rate_quality_gap"],
+                "win_rate_padding_suspected": metrics["win_rate_padding_suspected"],
+                "win_rate_padding_severity": metrics["win_rate_padding_severity"],
+                "small_bet_roi_padding_suspected": metrics["small_bet_roi_padding_suspected"],
+                "small_bet_high_roi_wins": metrics["small_bet_high_roi_wins"],
+                "correlated_cluster_suspected": metrics["correlated_cluster_suspected"],
+                "top_event_cluster_markets": metrics["top_event_cluster_markets"],
+                "top_event_cluster_profit_share": metrics["top_event_cluster_profit_share"],
+                "tail_risk_suspected": metrics["tail_risk_suspected"],
+                "largest_loss_to_median_win": metrics["largest_loss_to_median_win"],
                 "median_market_roi": metrics["median_market_roi"],
                 "roi_ex_top1": metrics["roi_ex_top1"],
                 "roi_ex_top1_buy_notional": metrics["roi_ex_top1_buy_notional"],
@@ -1084,10 +1471,12 @@ def category_verdict(metrics: dict[str, Any], config: dict[str, float]) -> str:
         return "inconclusive"
     if metrics["is_one_hit_wonder"]:
         return "lucky_or_one_hit_wonder"
+    if metrics["win_rate_padding_suspected"]:
+        return "inconclusive"
     if (
         (metrics["roi_buy_notional"] or 0.0) > config["skilled_roi_buy_notional"]
         and (metrics["roi_ex_top1_buy_notional"] or 0.0) > 0
-        and metrics["market_win_rate"] > config["skilled_market_win_rate"]
+        and metrics["meaningful_market_win_rate"] > config["skilled_market_win_rate"]
         and (metrics["median_market_roi"] or -1.0) > config["skilled_median_roi_floor"]
     ):
         return "skilled"
@@ -1113,9 +1502,10 @@ def final_verdict(summary: dict[str, Any], category_breakdown: list[dict[str, An
             summary["total_markets"] >= config["skilled_min_markets"],
             (summary["roi_ex_top1_buy_notional"] or -1.0) > 0,
             (summary["roi_ex_top3_buy_notional"] or -1.0) >= 0,
-            summary["market_win_rate"] > config["skilled_market_win_rate"],
+            summary["meaningful_market_win_rate"] > config["skilled_market_win_rate"],
             (summary["median_market_roi"] or -1.0) > config["skilled_median_roi_floor"],
             (summary["top1_contribution_net_pnl"] or 1.0) < config["skilled_top1_contribution_max"],
+            not summary["win_rate_padding_suspected"],
             summary["confidence_level"] != "low",
         )
     )
@@ -1185,6 +1575,27 @@ def build_warnings(
         > config["max_other_category_ratio_medium"]
     ):
         warnings.append("Nhiều market bị phân loại Other; kết luận theo category có thể yếu.")
+    if results:
+        wallet_metrics = aggregate_market_metrics(results, config)
+        if wallet_metrics["win_rate_padding_suspected"]:
+            warnings.append(
+                "win_rate_padding_suspected: nhiều market thắng có PnL/ROI quá nhỏ, "
+                "raw win rate có thể bị làm đẹp và không phản ánh edge thật."
+            )
+        padded_categories = []
+        for category in CATEGORY_ORDER:
+            category_rows = [row for row in results if row.get("category") == category]
+            if not category_rows:
+                continue
+            category_metrics = aggregate_market_metrics(category_rows, config)
+            if category_metrics["win_rate_padding_suspected"]:
+                padded_categories.append(category)
+        if padded_categories:
+            warnings.append(
+                "category_win_rate_padding_suspected: "
+                + ", ".join(padded_categories)
+                + " có nhiều low-value wins; không nên đọc raw category win rate như skill thật."
+            )
     return warnings
 
 
@@ -1208,12 +1619,19 @@ def build_skill_report(
     for component in components:
         component.setdefault("contribution", None)
     skill_score, score_adjustment = adjusted_skill_score(raw_skill_score, summary, config)
+    copy_suitability = copy_suitability_report(summary, skill_score, config)
 
     return {
         "skill_score": skill_score,
         "raw_skill_score": raw_skill_score,
         "adjusted_skill_score": skill_score,
         "score_adjustment": score_adjustment,
+        "copy_suitability_score": copy_suitability["score"],
+        "copy_suitability_raw_score": copy_suitability["raw_score"],
+        "copy_suitability_label": copy_suitability["label"],
+        "copy_suitability_detail": copy_suitability["detail"],
+        "copy_suitability_adjustment": copy_suitability["adjustment"],
+        "copy_suitability_components": copy_suitability["components"],
         "verdict": summary["verdict"],
         "legacy_verdict": legacy_verdict(summary["verdict"]),
         "verdict_label": verdict_label(summary["verdict"]),
@@ -1329,32 +1747,259 @@ def adjusted_skill_score(
     config: dict[str, float],
 ) -> tuple[int | None, dict[str, Any]]:
     if raw_score is None:
-        return None, {"applied": False, "reason": None, "cap": None, "raw_score": None}
+        return None, {
+            "applied": False,
+            "reason": None,
+            "cap": None,
+            "raw_score": None,
+            "adjusted_score": None,
+            "caps": [],
+            "reasons": [],
+        }
 
+    caps = skill_score_caps(summary, config)
+    adjusted_score = raw_score
+    primary_cap: dict[str, Any] | None = None
+    if caps:
+        primary_cap = min(caps, key=lambda item: int(item["cap"]))
+        adjusted_score = min(raw_score, int(primary_cap["cap"]))
+
+    applied = adjusted_score < raw_score
     adjustment: dict[str, Any] = {
-        "applied": False,
-        "reason": None,
-        "cap": None,
+        "applied": applied,
+        "reason": primary_cap["reason"] if applied and primary_cap else None,
+        "cap": primary_cap["cap"] if applied and primary_cap else None,
         "raw_score": raw_score,
+        "adjusted_score": adjusted_score,
+        "caps": caps,
+        "reasons": [str(item["reason"]) for item in caps],
     }
+    return adjusted_score, adjustment
 
-    cap: int | None = None
-    reason: str | None = None
-    if summary["verdict"] == "lucky_or_one_hit_wonder":
-        cap = int(config["one_hit_skill_score_cap"])
-        reason = "one_hit_wonder_cap"
-    elif summary["verdict"] == "insufficient_data" and any(
+def skill_score_caps(summary: dict[str, Any], config: dict[str, float]) -> list[dict[str, Any]]:
+    caps: list[dict[str, Any]] = []
+
+    def add(reason: str, cap_key: str, detail: str) -> None:
+        caps.append({"reason": reason, "cap": int(config[cap_key]), "detail": detail})
+
+    verdict = str(summary.get("verdict") or "inconclusive")
+    if verdict == "lucky_or_one_hit_wonder":
+        add("one_hit_wonder_cap", "one_hit_skill_score_cap", "Lợi nhuận phụ thuộc quá nhiều vào top market/top3.")
+    elif verdict == "insufficient_data" and any(
         "low_sample_one_hit_pattern_detected" in warning for warning in summary.get("warnings", [])
     ):
-        cap = int(config["low_sample_one_hit_skill_score_cap"])
-        reason = "low_sample_one_hit_pattern_cap"
+        add(
+            "low_sample_one_hit_pattern_cap",
+            "low_sample_one_hit_skill_score_cap",
+            "Mẫu quá ít nhưng đã có dấu hiệu lợi nhuận tập trung kiểu one-hit.",
+        )
+    elif verdict == "insufficient_data":
+        add("insufficient_data_cap", "insufficient_data_skill_score_cap", "Không đủ số market để kết luận skill chắc chắn.")
+    elif verdict == "category_skilled":
+        add(
+            "category_skilled_cap",
+            "category_skilled_skill_score_cap",
+            "Chỉ thấy edge rõ ở một vài category, chưa phải skilled toàn ví.",
+        )
+    elif verdict == "inconclusive":
+        add("inconclusive_cap", "inconclusive_skill_score_cap", "Các chỉ số chưa đủ đồng thuận để kết luận skilled.")
 
-    if cap is None or raw_score <= cap:
-        return raw_score, adjustment
+    if summary.get("data_truncated"):
+        add("data_truncated_cap", "data_truncated_skill_score_cap", "Dữ liệu bị truncate nên điểm không nên quá cao.")
+    if summary.get("confidence_level") == "low":
+        add("low_confidence_cap", "low_confidence_skill_score_cap", "Độ tin cậy dữ liệu/thống kê thấp.")
+    if summary.get("win_rate_padding_suspected"):
+        add(
+            "win_rate_padding_cap",
+            "win_rate_padding_skill_score_cap",
+            "Raw win rate có dấu hiệu bị làm đẹp bằng nhiều market thắng PnL/ROI rất nhỏ.",
+        )
+    elif int(summary.get("metric_gaming_flags_count") or 0) > 0:
+        add(
+            "metric_gaming_cap",
+            "metric_gaming_skill_score_cap",
+            "Có detector phát hiện pattern làm đẹp chỉ số hoặc rủi ro bị che khuất.",
+        )
 
-    adjustment.update({"applied": True, "reason": reason, "cap": cap})
-    return cap, adjustment
+    copy_risk = summary.get("recent_copy_risk_level")
+    if copy_risk == "high":
+        add(
+            "recent_copy_risk_high_cap",
+            "recent_copy_risk_high_skill_score_cap",
+            "Phong độ/copy risk gần đây đang xấu.",
+        )
+    elif copy_risk == "medium":
+        add(
+            "recent_copy_risk_medium_cap",
+            "recent_copy_risk_medium_skill_score_cap",
+            "Có cảnh báo copy risk gần đây nên giảm điểm hiển thị.",
+        )
 
+    if (summary.get("market_win_rate") or 0.0) < 0.50 and (summary.get("median_market_roi") or 0.0) < 0:
+        add(
+            "weak_hit_rate_cap",
+            "weak_hit_rate_skill_score_cap",
+            "Win rate dưới 50% và median ROI âm.",
+        )
+    return caps
+
+def copy_suitability_report(
+    summary: dict[str, Any],
+    skill_score: int | None,
+    config: dict[str, float],
+) -> dict[str, Any]:
+    components = copy_suitability_components(summary, skill_score)
+    raw_score = int(round(sum(float(component["contribution"]) for component in components)))
+    caps = copy_suitability_caps(summary, config)
+    adjusted_score = raw_score
+    primary_cap: dict[str, Any] | None = None
+    if caps:
+        primary_cap = min(caps, key=lambda item: int(item["cap"]))
+        adjusted_score = min(raw_score, int(primary_cap["cap"]))
+    adjustment = {
+        "applied": adjusted_score < raw_score,
+        "reason": primary_cap["reason"] if adjusted_score < raw_score and primary_cap else None,
+        "cap": primary_cap["cap"] if adjusted_score < raw_score and primary_cap else None,
+        "raw_score": raw_score,
+        "adjusted_score": adjusted_score,
+        "caps": caps,
+        "reasons": [str(item["reason"]) for item in caps],
+    }
+    return {
+        "score": adjusted_score,
+        "raw_score": raw_score,
+        "label": copy_suitability_label(adjusted_score),
+        "detail": copy_suitability_detail(adjusted_score, summary),
+        "adjustment": adjustment,
+        "components": components,
+    }
+
+def copy_suitability_caps(summary: dict[str, Any], config: dict[str, float]) -> list[dict[str, Any]]:
+    caps: list[dict[str, Any]] = []
+
+    def add(reason: str, cap_key: str, detail: str) -> None:
+        caps.append({"reason": reason, "cap": int(config[cap_key]), "detail": detail})
+
+    verdict = str(summary.get("verdict") or "inconclusive")
+    if verdict == "unprofitable":
+        add("copy_unprofitable_cap", "copy_score_unprofitable_cap", "Wallet đang âm PnL tổng.")
+    if verdict == "insufficient_data":
+        add("copy_insufficient_data_cap", "copy_score_insufficient_data_cap", "Mẫu quá ít để copy tự tin.")
+    if verdict == "lucky_or_one_hit_wonder":
+        add("copy_one_hit_cap", "copy_score_one_hit_cap", "Lợi nhuận dài hạn phụ thuộc top market/top3.")
+    if summary.get("confidence_level") == "low" or summary.get("data_truncated"):
+        add("copy_low_confidence_cap", "copy_score_low_confidence_cap", "Dữ liệu/độ tin cậy thấp.")
+    copy_risk = summary.get("recent_copy_risk_level")
+    if copy_risk == "high":
+        add("copy_recent_high_risk_cap", "copy_score_high_risk_cap", "Phong độ gần đây đang lỗ/rủi ro cao.")
+    elif copy_risk == "medium":
+        add("copy_recent_medium_risk_cap", "copy_score_medium_risk_cap", "Có cảnh báo phong độ gần đây.")
+    return caps
+
+def copy_suitability_components(summary: dict[str, Any], skill_score: int | None) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = [
+        {
+            "label": "3 ngày BUY mark-to-market",
+            "normalized": recent_roi_score(
+                summary.get("recent_3d_buy_roi"),
+                int(summary.get("recent_3d_buy_marked_count") or 0),
+                min_count=10,
+            ),
+            "weight": 30,
+            "detail": (
+                f"BUY PnL {format_money(summary.get('recent_3d_buy_estimated_pnl'))}, "
+                f"ROI {format_percent(summary.get('recent_3d_buy_roi'))}, "
+                f"marked {int(summary.get('recent_3d_buy_marked_count') or 0)} trades."
+            ),
+        },
+        {
+            "label": "3 ngày market-level PnL",
+            "normalized": recent_roi_score(
+                summary.get("recent_3d_market_roi_buy_notional"),
+                int(summary.get("recent_3d_market_count") or 0),
+                min_count=5,
+            ),
+            "weight": 20,
+            "detail": (
+                f"Market PnL {format_money(summary.get('recent_3d_market_pnl'))}, "
+                f"ROI {format_percent(summary.get('recent_3d_market_roi_buy_notional'))}, "
+                f"{int(summary.get('recent_3d_market_count') or 0)} markets."
+            ),
+        },
+        {
+            "label": "Recent copy risk",
+            "normalized": copy_risk_score(summary.get("recent_copy_risk_level")),
+            "weight": 20,
+            "detail": str(summary.get("recent_copy_risk_reason") or "Không có lý do copy risk."),
+        },
+        {
+            "label": "Tần suất/liquidity gần đây",
+            "normalized": frequency_score(summary),
+            "weight": 10,
+            "detail": (
+                f"{int(summary.get('recent_3d_trade_count') or 0)} trades/3 ngày, "
+                f"{float(summary.get('recent_3d_avg_trades_per_day') or 0.0):.1f} trades/ngày."
+            ),
+        },
+        {
+            "label": "Skill dài hạn đã điều chỉnh",
+            "normalized": None if skill_score is None else clamp(float(skill_score) / 100.0, 0.0, 1.0),
+            "weight": 10,
+            "detail": f"Risk-adjusted skill score {skill_score}/100." if skill_score is not None else "Không có skill score.",
+        },
+        {
+            "label": "Chất lượng dữ liệu",
+            "normalized": data_quality_score(summary),
+            "weight": 10,
+            "detail": f"Confidence {summary.get('confidence_level')}, unmapped {int(summary.get('unmapped_records_count') or 0)} records.",
+        },
+    ]
+    total_weight = sum(float(row["weight"]) for row in rows if row["normalized"] is not None)
+    for row in rows:
+        if row["normalized"] is None or total_weight <= 0:
+            row["contribution"] = 0.0
+        else:
+            row["contribution"] = round(100.0 * float(row["normalized"]) * float(row["weight"]) / total_weight, 1)
+    return rows
+
+def recent_roi_score(value: Any, observed_count: int, min_count: int) -> float:
+    if observed_count < min_count or value is None:
+        return 0.35
+    return clamp(0.50 + float(value) * 4.0, 0.0, 1.0)
+
+def copy_risk_score(level: Any) -> float:
+    return {"low": 1.0, "medium": 0.55, "high": 0.15, "unknown": 0.40}.get(str(level), 0.40)
+
+def frequency_score(summary: dict[str, Any]) -> float:
+    trades_per_day = float(summary.get("recent_3d_avg_trades_per_day") or 0.0)
+    trade_count = float(summary.get("recent_3d_trade_count") or 0.0)
+    return max(clamp(trades_per_day / 8.0, 0.0, 1.0), clamp(trade_count / 30.0, 0.0, 1.0) * 0.8)
+
+def data_quality_score(summary: dict[str, Any]) -> float:
+    score = {"high": 1.0, "medium": 0.75, "low": 0.35}.get(str(summary.get("confidence_level")), 0.50)
+    if summary.get("data_truncated"):
+        score = min(score, 0.25)
+    unmapped_ratio = float(summary.get("unmapped_records_ratio") or 0.0)
+    if unmapped_ratio > 0.10:
+        score = min(score, 0.50)
+    return score
+
+def copy_suitability_label(score: int | None) -> str:
+    if score is None:
+        return "Không đủ dữ liệu"
+    if score >= 75:
+        return "Tốt để theo dõi/copy thận trọng"
+    if score >= 55:
+        return "Cần thận trọng"
+    return "Rủi ro cao để copy ngay"
+
+def copy_suitability_detail(score: int, summary: dict[str, Any]) -> str:
+    risk = summary.get("recent_copy_risk_level", "unknown")
+    if score >= 75:
+        return f"Phong độ gần đây và skill dài hạn khá đồng thuận; copy risk hiện là {risk}."
+    if score >= 55:
+        return f"Có một số tín hiệu tốt nhưng vẫn có rủi ro gần đây/dữ liệu; copy risk hiện là {risk}."
+    return f"Không nên copy mù lúc này; copy risk hiện là {risk} hoặc dữ liệu/score chưa đủ mạnh."
 
 def skill_components(summary: dict[str, Any]) -> list[dict[str, Any]]:
     profit_factor = summary["profit_factor"]
@@ -1368,9 +2013,13 @@ def skill_components(summary: dict[str, Any]) -> list[dict[str, Any]]:
     return [
         {
             "label": "Ý nghĩa thống kê / hit-rate",
-            "normalized": clamp(((summary["market_win_rate"] or 0.0) - 0.45) / 0.25, 0.0, 1.0),
+            "normalized": clamp(((summary["meaningful_market_win_rate"] or 0.0) - 0.45) / 0.25, 0.0, 1.0),
             "weight": 25,
-            "detail": f"Win rate {format_percent(summary['market_win_rate'])}, median ROI {format_percent(summary['median_market_roi'])}.",
+            "detail": (
+                f"Raw win rate {format_percent(summary['market_win_rate'])}, "
+                f"meaningful win rate {format_percent(summary['meaningful_market_win_rate'])}, "
+                f"low-value wins {summary['low_value_winning_markets']}."
+            ),
         },
         {
             "label": "Outcome-level edge",
@@ -1628,8 +2277,25 @@ def unmapped_record(source_name: str, record: dict[str, Any]) -> dict[str, Any]:
 
 def classify_market(*values: str) -> str:
     haystack = " ".join(value for value in values if value).lower()
+    weather_patterns = (
+        r"\bweather\b",
+        r"\bclimate\b",
+        r"\bhurricane\b",
+        r"\btornado\b",
+        r"\bstorm\b",
+        r"\btemperature\b",
+        r"highest temperature",
+        r"lowest temperature",
+        r"\bdegrees?\b",
+        r"°\s*[cf]\b",
+        r"\brain(?:fall)?\b",
+        r"\bsnow(?:fall|storm)?\b",
+        r"\bheat\s?wave\b",
+    )
+    if any(re.search(pattern, haystack) for pattern in weather_patterns):
+        return "Weather"
+
     categories = {
-        "Weather": ("hurricane", "temperature", "rain", "snow", "weather", "climate", "storm", "heat"),
         "Politics": (
             "election",
             "president",
@@ -1659,6 +2325,15 @@ def classify_market(*values: str) -> str:
             "super bowl",
             "premier league",
             "tennis",
+            "olympic",
+            "olympics",
+            "gold medal",
+            "snowboard",
+            "rainbow six",
+            "call of duty",
+            "esports",
+            "bo3",
+            "game 1 winner",
         ),
         "Crypto": (
             "bitcoin",
@@ -1705,7 +2380,6 @@ def classify_market(*values: str) -> str:
         if any(keyword in haystack for keyword in keywords):
             return category
     return "Other"
-
 
 def record_cost(record: dict[str, Any]) -> float:
     total_bought = num(record, "totalBought", "total_bought")

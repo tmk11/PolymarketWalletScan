@@ -126,12 +126,39 @@ mypy .
 - `recent_7d_trade_count`, `recent_7d_trade_notional`, `recent_7d_avg_trades_per_day`, `recent_7d_frequency_label`: tần suất trade trong 7 ngày gần nhất, tính từ dữ liệu `/trades` cộng với `/activity` type `TRADE` đã dedupe, tương đối theo timestamp trade mới nhất trong dữ liệu ví.
 - `recent_copy_risk_level`: cảnh báo `high`/`medium` nếu 3 ngày gần nhất hoặc các cửa sổ BUY gần nhất đang lỗ theo mark-to-market estimate. Đây là cảnh báo cho người muốn copy ví, không thay thế verdict skill dài hạn.
 
+### Skill score vs Copy suitability score
+
+- `raw_skill_score`: điểm bằng chứng dài hạn trước khi cap, dựa trên meaningful win rate/median ROI, outcome-level edge, ổn định theo tháng, số event độc lập, concentration và profit factor.
+- `skill_score`: điểm skill dài hạn đã điều chỉnh rủi ro. Điểm này có thể bị cap nếu verdict là `lucky_or_one_hit_wonder`, `insufficient_data`, `inconclusive`, confidence thấp, dữ liệu bị truncate, hoặc `recent_copy_risk_level` đang `medium/high`.
+- `score_adjustment`: liệt kê các cap/reason đã áp dụng. Vì vậy một ví có raw score cao vẫn có displayed score thấp nếu lợi nhuận tập trung, dữ liệu yếu, hoặc phong độ gần đây xấu.
+- `copy_suitability_score`: điểm riêng cho câu hỏi “có nên copy ví này ngay không?”. Điểm này ưu tiên 3 ngày gần nhất: BUY mark-to-market, market-level PnL gần đây, copy risk, tần suất trade, rồi mới đến skill dài hạn và chất lượng dữ liệu.
+- `copy_suitability_score` thấp không có nghĩa ví không có skill dài hạn; nó nghĩa là entry/copy hiện tại rủi ro hơn, ví dụ 3 ngày gần nhất đang lỗ hoặc dữ liệu gần đây không đủ rõ.
+
+### Win-rate padding detector
+
+- `market_win_rate` là raw win rate nên có thể bị làm đẹp bằng nhiều market “thắng chắc” nhưng lời vài cent.
+- `meaningful_market_win_rate` chỉ tính market thắng có PnL và ROI đủ đáng kể, mặc định `pnl >= $1` và `roi_buy_notional >= 2%`.
+- `low_value_winning_markets` là số market thắng nhưng PnL/ROI quá nhỏ; `low_value_winning_markets_ratio` đo tỷ lệ nhóm này trên tổng market thắng.
+- `low_value_wins_profit_share` cho biết nhóm thắng nhỏ này đóng góp bao nhiêu vào gross profit; nếu win nhiều nhưng gần như không đóng góp PnL thì raw win rate không đáng tin.
+- `win_rate_quality_gap = market_win_rate - meaningful_market_win_rate`; gap lớn là dấu hiệu win-rate padding.
+- `win_rate_padding_suspected` bật khi ví/category có nhiều low-value wins, nhóm đó đóng góp rất ít PnL, và gap raw-vs-meaningful lớn. Khi flag này bật, analyzer không kết luận `skilled` chỉ nhờ raw win rate và sẽ cap `skill_score`.
+
+### Metric gaming flags khác
+
+- `small_bet_roi_padding`: nhiều kèo vốn rất nhỏ có ROI cao, làm ROI trung bình/unweighted nhìn đẹp nhưng đóng góp PnL thấp.
+- `correlated_cluster`: nhiều market nằm trong cùng `eventSlug` hoặc cùng cụm correlated, làm số market nhìn đa dạng hơn thực tế. Hãy xem `effective_bets`, `market_to_effective_bets_ratio`, `top_event_cluster_profit_share`.
+- `tail_risk`: ví thắng rất nhiều khoản nhỏ nhưng có loss lớn hiếm gặp; đây là kiểu “pennies in front of a steamroller”. Hãy xem `largest_loss_to_median_win`.
+- `unrealized_pnl_dominance`: PnL phụ thuộc nhiều vào open/unrealized positions, chưa phải lợi nhuận đã chốt.
+- `reward_dependency`: lợi nhuận phụ thuộc nhiều vào rewards/maker rebates, không nên tính như trading skill.
+- `recent_performance_divergence`: long-term PnL đẹp nhưng recent BUY/market windows đang xấu, rủi ro nếu copy ngay.
+- Các flag này được gom trong `metric_gaming_flags`; nếu có flag nghiêm trọng, `skill_score` có thể bị cap dù raw score cao.
+
 ### Verdict
 
 - `insufficient_data`: quá ít market hoặc dữ liệu không đủ để kết luận. Với sample nhỏ (<10 market), analyzer không kết luận chắc là lucky dù có pattern one-hit; thay vào đó thêm warning `low_sample_one_hit_pattern_detected` nếu thấy tín hiệu này.
 - `lucky_or_one_hit_wonder`: ví có lời nhưng lợi nhuận phụ thuộc quá nhiều vào một vài market lớn, hoặc ROI ex-top1/ex-top3 âm trên sample đủ lớn.
 - `category_skilled`: không skilled toàn bộ nhưng có dấu hiệu skill ở một category cụ thể.
-- `skilled`: có lợi nhuận phân tán, đủ mẫu, `roi_ex_top1`/`roi_ex_top3` vẫn ổn, win rate/median ROI hợp lý và confidence không thấp.
+- `skilled`: có lợi nhuận phân tán, đủ mẫu, `roi_ex_top1`/`roi_ex_top3` vẫn ổn, meaningful win rate/median ROI hợp lý, không bị flag win-rate padding và confidence không thấp.
 - `unprofitable`: trading PnL không dương trên sample đủ để đọc.
 - `resolved` / `won`: một market được coi là resolved khi có closed position hoặc activity `REDEEM`; open longshot chưa resolve không bị coi là thua.
 - `outcome_level_edge`: edge tính theo `conditionId + outcome/tokenId`, không trộn YES và NO trong cùng market. PnL vẫn gom ở market-level.

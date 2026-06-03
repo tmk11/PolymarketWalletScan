@@ -12,6 +12,8 @@ from polymarket_wallet_analyzer.skill_score import (
     compute_skill,
 )
 
+SECONDS_PER_DAY = 86_400
+
 
 def _ts(year: int, month: int) -> float:
     return datetime(year, month, 1, tzinfo=timezone.utc).timestamp()
@@ -51,6 +53,37 @@ def _build_wallet(positions=None, closed_positions=None, **kwargs) -> WalletData
         traded=kwargs.get("traded", 0.0),
     )
 
+def _recent_buy_trade(market_id: str, timestamp: float, price: float = 0.5, size: float = 10.0) -> dict:
+    return {
+        "conditionId": market_id,
+        "asset": f"asset-{market_id}",
+        "outcome": "Yes",
+        "side": "BUY",
+        "price": price,
+        "size": size,
+        "timestamp": timestamp,
+    }
+
+def _open_position(
+    market_id: str,
+    timestamp: float,
+    avg_price: float = 0.5,
+    cur_price: float = 0.0,
+    shares: float = 10.0,
+) -> dict:
+    return {
+        "conditionId": market_id,
+        "asset": f"asset-{market_id}",
+        "eventSlug": market_id,
+        "title": f"Market {market_id}",
+        "outcome": "Yes",
+        "totalBought": shares,
+        "avgPrice": avg_price,
+        "curPrice": cur_price,
+        "cashPnl": (cur_price - avg_price) * shares,
+        "timestamp": timestamp,
+    }
+
 
 def test_skilled_wallet_scores_high_and_has_positive_edge() -> None:
     # 60% win rate while consistently buying at 0.40 -> a real +0.20/share edge,
@@ -78,10 +111,13 @@ def test_skilled_wallet_scores_high_and_has_positive_edge() -> None:
     assert skill["breadth"]["effective_bets"] == 20
     assert skill["skill_score"] is not None
     assert skill["skill_score"] >= 60
+    assert skill["raw_skill_score"] is not None
+    assert skill["raw_skill_score"] >= skill["skill_score"]
     assert skill["verdict"] == "insufficient_data"
-    # Components renormalise to the final score.
+    assert skill["score_adjustment"]["reason"] == "insufficient_data_cap"
+    # Components describe the raw evidence score; final display score can be capped by verdict/data quality.
     contributions = [c["contribution"] for c in skill["components"] if c["contribution"] is not None]
-    assert abs(sum(contributions) - skill["skill_score"]) <= 1.5
+    assert abs(sum(contributions) - skill["raw_skill_score"]) <= 1.5
 
 
 def test_one_hit_wonder_flagged_as_lucky() -> None:
@@ -122,6 +158,40 @@ def test_one_hit_verdict_caps_displayed_skill_score() -> None:
     assert skill["adjusted_skill_score"] == skill["skill_score"]
     assert skill["score_adjustment"]["applied"] is True
     assert skill["score_adjustment"]["reason"] == "one_hit_wonder_cap"
+
+def test_recent_high_copy_risk_caps_skill_and_copy_scores() -> None:
+    closed = [
+        _closed_position(
+            market_id=f"winner-{index}",
+            entry_price=0.40,
+            won=True,
+            shares=100.0,
+            month=(index % 12) + 1,
+            event=f"event-{index}",
+        )
+        for index in range(50)
+    ]
+    reference_timestamp = _ts(2025, 12)
+    positions = [
+        _open_position(f"recent-loss-{index}", reference_timestamp - (index % 3) * SECONDS_PER_DAY)
+        for index in range(12)
+    ]
+    trades = [
+        _recent_buy_trade(f"recent-loss-{index}", reference_timestamp - (index % 3) * SECONDS_PER_DAY)
+        for index in range(12)
+    ]
+
+    report = analyze_wallet(_build_wallet(positions=positions, closed_positions=closed, trades=trades), max_records=5000)
+    summary = report["summary"]
+    skill = report["skill"]
+
+    assert summary["recent_copy_risk_level"] == "high"
+    assert skill["raw_skill_score"] is not None and skill["raw_skill_score"] > skill["skill_score"]
+    assert skill["skill_score"] == 55
+    assert skill["score_adjustment"]["reason"] == "recent_copy_risk_high_cap"
+    assert "recent_copy_risk_high_cap" in skill["score_adjustment"]["reasons"]
+    assert skill["copy_suitability_score"] <= 45
+    assert "copy_recent_high_risk_cap" in skill["copy_suitability_adjustment"]["reasons"]
 
 
 def test_unprofitable_wallet_is_not_skilled() -> None:

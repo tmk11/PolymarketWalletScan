@@ -102,6 +102,17 @@ metric_cols[2].metric(
 metric_cols[3].metric("Confidence", summary.get("confidence_level", "medium"))
 metric_cols[4].metric("Unmapped", f"{summary.get('unmapped_records_count', 0):,}")
 
+metric_cols = st.columns(5)
+metric_cols[0].metric("Meaningful win rate", pct(summary.get("meaningful_market_win_rate")))
+metric_cols[1].metric("Low-value wins", f"{summary.get('low_value_winning_markets', 0):,}")
+metric_cols[2].metric("Win-rate gap", pct(summary.get("win_rate_quality_gap")))
+metric_cols[3].metric("Padding flag", "YES" if summary.get("win_rate_padding_suspected") else "NO")
+metric_cols[4].metric("Padding severity", str(summary.get("win_rate_padding_severity", "none")).upper())
+
+gaming_flags = summary.get("metric_gaming_flags", [])
+if gaming_flags:
+    st.warning("Metric gaming flags: " + ", ".join(flag.get("name", "unknown") for flag in gaming_flags))
+
 st.subheader("📉 Phong độ gần đây / Copy risk")
 risk_styles = {"high": st.error, "medium": st.warning, "low": st.success, "unknown": st.info}
 risk_level = summary.get("recent_copy_risk_level", "unknown")
@@ -343,6 +354,10 @@ if not category_breakdown_df.empty:
             "roi_cost_basis": st.column_config.NumberColumn("ROI cost", format="%.2%"),
             "roi_buy_notional": st.column_config.NumberColumn("ROI buy", format="%.2%"),
             "market_win_rate": st.column_config.NumberColumn("Win rate", format="%.2%"),
+            "meaningful_market_win_rate": st.column_config.NumberColumn("Meaningful win", format="%.2%"),
+            "low_value_winning_markets_ratio": st.column_config.NumberColumn("Low-value win %", format="%.2%"),
+            "low_value_wins_profit_share": st.column_config.NumberColumn("Low-value profit share", format="%.2%"),
+            "win_rate_quality_gap": st.column_config.NumberColumn("Win-rate gap", format="%.2%"),
             "median_market_roi": st.column_config.NumberColumn("Median ROI", format="%.2%"),
             "roi_ex_top1": st.column_config.NumberColumn("ROI ex top1", format="%.2%"),
             "top1_contribution": st.column_config.NumberColumn("Top1/net", format="%.2%"),
